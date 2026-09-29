@@ -71,6 +71,19 @@ apply_migrations ─┬─> drop_member_files ─> load_member_files (SCD2, depe
 Deployed with Terraform to a real AWS account and run end to end against
 Redshift Serverless.
 
+**The Airflow DAG, one full daily run, all 9 tasks green.** Migrations
+run first; the roster load and the three API sources follow, with the
+sources in parallel; social-needs tagging waits for Salesforce; data
+quality gates the KPI publish.
+
+![Airflow DAG graph](pics/airflow_dag_graph.jpg)
+
+**The same run in the Grid view:** per-task start times and durations. The
+whole pipeline takes under 2 minutes, with every task succeeding on its
+first try.
+
+![Airflow DAG grid](pics/airflow_dag_grid.jpg)
+
 **Monthly program KPIs per health plan**: what each customer receives
 (`analytics.v_plan_monthly_kpis`).
 
