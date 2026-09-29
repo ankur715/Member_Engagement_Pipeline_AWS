@@ -1,0 +1,27 @@
+.env
+*.pyc
+__pycache__/
+.venv/
+airflow/.venv/
+airflow/airflow_home/
+.DS_Store
+.pytest_cache/
+.coverage
+htmlcov/
+*.pdf
+
+# Terraform: state holds the Redshift admin password in plain text -- never commit it
+infra/terraform/.terraform/
+infra/terraform/*.tfstate
+infra/terraform/*.tfstate.*
+infra/terraform/terraform.tfvars
+# Saved plans embed variable values -- including the Redshift password
+infra/terraform/tfplan
+*.tfplan
+
+# Google service-account keys
+*service_account*.json
+
+# AWS access keys downloaded from the console -- never commit
+*accessKeys*.csv
+*credentials*.csv

@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Unit tests (no AWS needed -- S3 is mocked with moto, APIs with FastAPI TestClient)
+        run: pytest -q tests
+
+  dag-tests:
+    runs-on: ubuntu-latest
+    env:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r airflow/requirements.txt pytest
+      - name: DAG integrity tests
+        working-directory: airflow
+        run: |
+          export AIRFLOW_HOME="$RUNNER_TEMP/airflow_home"
+          export AIRFLOW__CORE__DAGS_FOLDER="$(pwd)/dags"
+          airflow db migrate
+          pytest -q tests
+
+  terraform-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: fmt + validate (no AWS credentials needed)
+        working-directory: infra/terraform
+        run: |
+          terraform fmt -check -diff || echo "::warning::terraform fmt would reformat files"
+          terraform init -backend=false
+          terraform validate

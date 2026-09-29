@@ -1,0 +1,5 @@
+--constraint https://raw.githubusercontent.com/apache/airflow/constraints-3.3.2/constraints-3.11.txt
+apache-airflow==3.3.2
+apache-airflow-providers-standard
+apache-airflow-providers-smtp
+-r ../requirements.txt

@@ -1,0 +1,4 @@
+# cp terraform.tfvars.example terraform.tfvars   (terraform.tfvars is gitignored)
+allowed_cidr            = "203.0.113.10/32"   # curl -s https://checkip.amazonaws.com
+redshift_admin_password = "ChangeMe-Str0ng"
+alert_email             = "you@example.com"
