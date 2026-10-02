@@ -372,3 +372,64 @@ def socrata_hpd(where: str | None = Query(default=None, alias="$where"),
         wanted = {z.strip().strip("'\"") for z in m.group(1).split(",")}
         rows = [r for r in rows if r["zip"][:5] in wanted or r["zip"] == ""]
     return rows[offset:offset + limit]                              # Socrata returns a bare JSON list
+
+
+# ----------------------------------------------- NOAA / NWS weather alerts
+# Same path and GeoJSON shape as api.weather.gov/alerts/active (public, no
+# token). Real NY alerts are seasonal, so for demos the scenario can be forced:
+#   MOCK_WEATHER_SCENARIO=heat | cold | none | auto (default: by month)
+
+NWS_SAME = {"Bronx": "036005", "Kings": "036047", "Queens": "036081", "Nassau": "036059", "Westchester": "036119"}
+
+
+def _scenario(now: datetime) -> str:
+    s = os.environ.get("MOCK_WEATHER_SCENARIO", "auto").lower()
+    if s != "auto":
+        return s
+    return "heat" if now.month in (6, 7, 8, 9) else ("cold" if now.month in (12, 1, 2, 3) else "none")
+
+
+def _nws_feature(alert_key: str, event: str, severity: str, counties: list[str], onset: datetime,
+                 ends: datetime | None, expires: datetime, message_type: str = "Alert") -> dict:
+    local = timezone(timedelta(hours=-4))                   # NWS sends local offsets, e.g. -04:00
+    iso = lambda d: d.astimezone(local).isoformat(timespec="seconds") if d else None  # noqa: E731
+    alert_id = f"urn:oid:2.49.0.1.840.0.{hashlib.sha1(alert_key.encode()).hexdigest()}.001.1"
+    return {"id": f"https://api.weather.gov/alerts/{alert_id}", "type": "Feature", "geometry": None,
+            "properties": {
+                "id": alert_id, "event": event, "severity": severity, "urgency": "Expected",
+                "certainty": "Likely", "status": "Actual", "messageType": message_type,
+                "onset": iso(onset), "effective": iso(onset), "ends": iso(ends), "expires": iso(expires),
+                "headline": f"{event} issued for {', '.join(counties)} County",
+                "areaDesc": "; ".join(counties),
+                "geocode": {"SAME": [NWS_SAME[c] for c in counties], "UGC": [f"NYZ0{70 + i}" for i, _ in enumerate(counties)]},
+            }}
+
+
+def nws_active_alerts(now: datetime) -> list[dict]:
+    day = now.date()
+    start = datetime.combine(day, time(10), tzinfo=timezone.utc)   # issued this morning
+    features = []
+    scenario = _scenario(now)
+    if scenario == "heat":
+        features.append(_nws_feature(f"heat-{day}", "Heat Advisory", "Moderate", ["Kings", "Bronx", "Queens"],
+                                     start - timedelta(hours=12), start + timedelta(hours=36), start + timedelta(hours=36)))
+        features.append(_nws_feature(f"xheat-{day}", "Extreme Heat Warning", "Severe", ["Bronx"],
+                                     start - timedelta(hours=6), None, start + timedelta(hours=30)))  # no "ends": use expires
+    elif scenario == "cold":
+        features.append(_nws_feature(f"cold-{day}", "Extreme Cold Warning", "Severe", ["Kings", "Bronx", "Nassau", "Westchester"],
+                                     start - timedelta(hours=12), start + timedelta(hours=30), start + timedelta(hours=30)))
+        features.append(_nws_feature(f"cwa-{day}", "Cold Weather Advisory", "Moderate", ["Queens"],
+                                     start - timedelta(hours=6), start + timedelta(hours=24), start + timedelta(hours=24)))
+    # Always-present noise the pipeline must ignore for the index: a marine alert.
+    noise = _nws_feature(f"marine-{day}", "Small Craft Advisory", "Minor", ["Kings"],
+                         start - timedelta(hours=3), start + timedelta(hours=12), start + timedelta(hours=12))
+    noise["properties"]["geocode"]["SAME"] = ["073335"]             # marine zone, not a county
+    features.append(noise)
+    return features
+
+
+@app.get("/alerts/active")
+def nws_alerts_active(area: str | None = None):
+    features = nws_active_alerts(_now()) if (area or "NY").upper() == "NY" else []
+    return {"@context": {}, "type": "FeatureCollection", "title": "Current watches, warnings, and advisories",
+            "updated": _now().isoformat(timespec="seconds"), "features": features}

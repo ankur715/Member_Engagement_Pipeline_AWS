@@ -174,6 +174,29 @@ HOUSING_VIOLATIONS = StagingSpec("housing_violations", (
     ("nov_description", pa.string()),
 ))
 
+# NWS weather alerts (one row per alert) and the counties each alert covers.
+WEATHER_ALERTS = StagingSpec("weather_alerts", (
+    ("load_id", pa.string()),
+    ("alert_id", pa.string()),
+    ("event", pa.string()),
+    ("hazard", pa.string()),
+    ("severity", pa.string()),
+    ("urgency", pa.string()),
+    ("certainty", pa.string()),
+    ("message_type", pa.string()),
+    ("onset_at", TS),
+    ("ends_at", TS),
+    ("headline", pa.string()),
+    ("seen_at", TS),
+))
+
+WEATHER_ALERT_COUNTIES = StagingSpec("weather_alert_counties", (
+    ("load_id", pa.string()),
+    ("alert_id", pa.string()),
+    ("county_fips", pa.string()),
+))
+
 # Every contract, so tests can check each one against the staging DDL.
 ALL_SPECS = (MEMBER_ELIGIBILITY, ENGAGEMENTS, EVENTS, EVENT_ATTENDANCE, CONTACT_PREFERENCES,
-             MEMBER_SDOH_NEEDS, NOTE_CLASSIFICATIONS, CLAIMS, HRA_RESPONSES, HOUSING_VIOLATIONS)
+             MEMBER_SDOH_NEEDS, NOTE_CLASSIFICATIONS, CLAIMS, HRA_RESPONSES, HOUSING_VIOLATIONS,
+             WEATHER_ALERTS, WEATHER_ALERT_COUNTIES)

@@ -149,6 +149,19 @@ CHECKS = [
     Check("housing_violations_present", "warn",
           "SELECT COUNT(*) FROM core.housing_violations",
           lambda v: v > 0, "Open NYC housing violations loaded for member ZIPs (0 = pull likely failed)"),
+
+    # --- public data: NOAA weather alerts ---
+    Check("weather_alerts_pulled_today", "warn",
+          """SELECT COUNT(*) FROM ops.load_audit
+             WHERE entity = 'weather_alerts' AND status = 'succeeded'
+               AND RIGHT(load_id, 10) = %(batch_date)s""",
+          lambda v: v >= 1, "NWS alerts pulled for this date (zero alerts is fine; a failed pull is not)"),
+    Check("weather_alerts_unmapped_counties", "warn",
+          """SELECT COUNT(*) FROM core.weather_alert_counties ac
+             JOIN core.weather_alerts a ON a.alert_id = ac.alert_id AND a.hazard IN ('heat', 'cold')
+             LEFT JOIN core.county_fips f ON f.county_fips = ac.county_fips
+             WHERE f.county_fips IS NULL""",
+          lambda v: v == 0, "Heat/cold alert counties missing from core.county_fips (members there would be missed)"),
 ]
 
 

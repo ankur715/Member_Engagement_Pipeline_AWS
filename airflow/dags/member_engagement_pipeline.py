@@ -142,6 +142,12 @@ def member_engagement_pipeline():
         from pipeline.ingest import housing_violations
         return housing_violations.main(ds)
 
+    @task(pool=REDSHIFT_POOL)
+    def ingest_weather_alerts(ds: str = None):
+        # Public NOAA/NWS alerts for NY (heat / cold). Production: run every 1-2 hours.
+        from pipeline.ingest import weather_alerts
+        return weather_alerts.main(ds)
+
     @task(retries=0)  # a DQ failure is a data problem; retrying won't fix it
     def data_quality(ds: str = None):
         from pipeline.quality import data_quality as dq
@@ -167,6 +173,7 @@ def member_engagement_pipeline():
     claims = load_claims()
     hra = load_hra()
     housing = ingest_housing_violations()
+    weather = ingest_weather_alerts()
     dq = data_quality()
 
     # --- Wire the dependencies (">>" = "runs before") ---
@@ -176,7 +183,8 @@ def member_engagement_pipeline():
     migrations >> drop_claims_files() >> claims           # claims extracts, then load
     migrations >> drop_hra_file() >> hra                  # HRA survey export, then load
     members >> housing                                    # needs current member ZIPs
-    [members, sdoh, events, dnc, claims, hra, housing] >> dq >> publish_plan_kpis()  # KPIs go out only if DQ passes
+    migrations >> weather                                 # public NWS alerts
+    [members, sdoh, events, dnc, claims, hra, housing, weather] >> dq >> publish_plan_kpis()  # KPIs go out only if DQ passes
 
 
 # Calling the decorated function registers the DAG with Airflow.
