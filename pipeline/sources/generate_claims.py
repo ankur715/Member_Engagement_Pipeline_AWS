@@ -50,12 +50,14 @@ def _visit_rows(plan_key: str, received: date, rng: random.Random) -> list[dict]
     """Original (freq 1) claims received on one day for one plan."""
     members = [m["member_id"] for m in member_roster() if m["plan_key"] == plan_key]
     rows = []
-    for n in range(1, rng.randint(6, 12) + 1):
+    for n in range(1, rng.randint(1, 3) + 1):          # ~25-30 claims per member per year
         member = rng.choice(members)
         f = frailty(member)
-        # Frail members are far more likely to have ER / inpatient claims.
+        # Frail members are far more likely to have ER / inpatient claims. Calibrated
+        # to roughly 0.5-1 ER visits per member per year on average (MA-like),
+        # several a year for the frailest members.
         visit = rng.choices(["er", "inpatient", "office", "wellness", "lab"],
-                            weights=[0.04 + 0.5 * f, 0.01 + 0.2 * f, 0.5, 0.15, 0.3])[0]
+                            weights=[0.004 + 0.06 * f, 0.0015 + 0.025 * f, 0.5, 0.15, 0.3])[0]
         claim_type, pos, rev, cpt, billed = VISIT_TYPES[visit]
         service_from = received - timedelta(days=rng.randint(3, 60))  # claims lag behind care
         service_to = service_from + timedelta(days=rng.randint(2, 7) if visit == "inpatient" else 0)
@@ -87,14 +89,15 @@ def build_rows(plan_key: str, received: date) -> list[dict]:
     # then replace one (freq 7, new paid amount) and maybe void another (freq 8).
     week_ago = received - timedelta(days=7)
     previous = _visit_rows(plan_key, week_ago, rng_for(f"claims-{plan_key}", week_ago.isoformat()))
-    if previous:
+    # Rates keep restatements to roughly 5-10% of claims, as in real feeds.
+    if previous and rng.random() < 0.15:
         replaced = dict(rng.choice(previous), FREQ_CD="7", RECEIVED_DT=received)
         replaced["PAID_AMT"] = round(replaced["PAID_AMT"] * 0.9, 2)
         rows.append(replaced)
-        if rng.random() < 0.5:
-            voided = dict(rng.choice(previous), FREQ_CD="8", RECEIVED_DT=received)
-            voided["PAID_AMT"] = -voided["PAID_AMT"]                 # reversal
-            rows.append(voided)
+    if previous and rng.random() < 0.06:
+        voided = dict(rng.choice(previous), FREQ_CD="8", RECEIVED_DT=received)
+        voided["PAID_AMT"] = -voided["PAID_AMT"]                     # reversal
+        rows.append(voided)
 
     out = []
     for r in rows:
@@ -111,9 +114,12 @@ def build_rows(plan_key: str, received: date) -> list[dict]:
             "RECEIVED_DT": _messy_date(rng, r["RECEIVED_DT"]),
         })
 
-    if out:
+    # Occasional mess, at realistic rates (a few % of rows overall).
+    if out and rng.random() < 0.30:
         out.append(dict(rng.choice(out)))                                  # resent duplicate row
+    if out and rng.random() < 0.08:
         out.append(dict(rng.choice(out), CLAIM_ID=""))                     # unusable: no claim id
+    if out and rng.random() < 0.05:
         out.append(dict(rng.choice(out), CLAIM_ID=f"BAD{received:%Y%m%d}", FROM_DT="13/45/2026"))  # bad date
     rng.shuffle(out)
     return out

@@ -1,5 +1,5 @@
 import io
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 
@@ -14,10 +14,15 @@ def _raw(plan_key="evergreen", day=DAY):
     return pd.read_csv(io.BytesIO(data), dtype=str, keep_default_na=False)
 
 
+def _month(plan_key="evergreen"):
+    return pd.concat([_raw(plan_key, DAY - timedelta(days=d)) for d in range(60)], ignore_index=True)
+
+
 def test_bad_rows_are_rejected_with_reasons():
-    clean, rejects = claims.normalize(_raw(), "evergreen")
-    assert len(rejects) == 2  # one missing claim id, one impossible date
+    raw = _month()
+    clean, rejects = claims.normalize(raw, "evergreen")
     assert set(rejects["reject_reason"]) == {"missing_claim_id;", "invalid_service_date;"}
+    assert 0 < len(rejects) / len(raw) < 0.10          # a few % of rows, like a real feed
     assert clean["claim_id"].notna().all() and clean["service_from"].notna().all()
 
 
@@ -51,16 +56,25 @@ def test_mixed_date_formats_parse_to_same_day():
 
 def test_duplicates_collapse_but_versions_survive():
     clean, _ = claims.normalize(_raw(), "evergreen")
+    assert not claims.normalize(_month(), "evergreen")[0].duplicated().any()
     assert not clean.duplicated().any()
-    # Restatements: the same claim id can appear as original (1) and replacement/void (7/8)
-    # across files; within a day's file the replacement rows reference last week's ids.
-    restated = clean[clean["freq_code"].isin(["7", "8"])]
-    assert len(restated) >= 1
-    assert (restated["claim_id"].str[3:11] == (DAY.replace(day=23)).strftime("%Y%m%d")).all()
+    # Restatements (7 replacement / 8 void) in a day's file always reference
+    # claims first received exactly 7 days earlier.
+    for d in range(60):
+        day = DAY - timedelta(days=d)
+        day_clean, _ = claims.normalize(_raw("evergreen", day), "evergreen")
+        restated = day_clean[day_clean["freq_code"].isin(["7", "8"])]
+        assert (restated["claim_id"].str[3:11] == (day - timedelta(days=7)).strftime("%Y%m%d")).all()
+
+
+def test_restatement_rate_is_realistic():
+    clean, _ = claims.normalize(_month(), "evergreen")
+    share = clean["freq_code"].isin(["7", "8"]).mean()
+    assert 0.02 < share < 0.20
 
 
 def test_voids_carry_negative_paid_amounts():
-    clean, _ = claims.normalize(pd.concat([_raw(day=DAY.replace(day=d)) for d in range(1, 30)]), "evergreen")
+    clean, _ = claims.normalize(pd.concat([_raw(day=DAY - timedelta(days=d)) for d in range(120)]), "evergreen")
     voids = clean[clean["claim_status"] == "void"]
     assert len(voids) > 0 and (voids["paid_amount"] < 0).all()
 
