@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import pyarrow as pa
 
 TS = pa.timestamp("us")  # Redshift doesn't accept nanosecond Parquet timestamps
+MONEY = pa.decimal128(12, 2)  # DECIMAL(12,2) in Redshift -- exact cents, no float drift
 
 
 # frozen=True: specs are constants and can't be changed by accident at runtime.
@@ -124,6 +125,27 @@ NOTE_CLASSIFICATIONS = StagingSpec("note_classifications", (
     ("classified_at", TS),
 ))
 
+# Medical claims from health plans (one row per claim version in a file).
+CLAIMS = StagingSpec("claims", (
+    ("load_id", pa.string()),
+    ("claim_id", pa.string()),
+    ("member_id", pa.string()),
+    ("health_plan", pa.string()),
+    ("claim_type", pa.string()),
+    ("place_of_service", pa.string()),
+    ("revenue_code", pa.string()),
+    ("cpt_code", pa.string()),
+    ("primary_dx", pa.string()),
+    ("service_from", pa.date32()),
+    ("service_to", pa.date32()),
+    ("billed_amount", MONEY),
+    ("paid_amount", MONEY),
+    ("claim_status", pa.string()),
+    ("freq_code", pa.string()),
+    ("received_date", pa.date32()),
+    ("source_file", pa.string()),
+))
+
 # Every contract, so tests can check each one against the staging DDL.
 ALL_SPECS = (MEMBER_ELIGIBILITY, ENGAGEMENTS, EVENTS, EVENT_ATTENDANCE, CONTACT_PREFERENCES,
-             MEMBER_SDOH_NEEDS, NOTE_CLASSIFICATIONS)
+             MEMBER_SDOH_NEEDS, NOTE_CLASSIFICATIONS, CLAIMS)

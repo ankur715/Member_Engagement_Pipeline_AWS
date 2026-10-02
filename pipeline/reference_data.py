@@ -78,3 +78,18 @@ def chw_names() -> list[str]:
     fake = Faker()
     Faker.seed(7)
     return [fake.name() for _ in range(6)]
+
+
+# --- Claims coding (used by the synthetic claims feed) ---------------------
+# Each visit type: (claim type, place of service, revenue code, CPT, typical billed $).
+# POS 23 / revenue 045x / CPT 9928x = emergency room; POS 21 + revenue 01xx = inpatient stay.
+VISIT_TYPES = {
+    "er":        ("I", "23", "0450", "99284", 1800.00),
+    "inpatient": ("I", "21", "0120", "",      14500.00),
+    "office":    ("P", "11", "",     "99214", 185.00),
+    "wellness":  ("P", "11", "",     "G0439", 175.00),
+    "lab":       ("P", "81", "",     "80053", 65.00),
+}
+
+# ICD-10 diagnosis codes common in a Medicare Advantage / Medicaid population.
+CLAIM_DX_CODES = ["E11.9", "I10", "I50.9", "J44.1", "N18.3", "R07.9", "J18.9", "E87.1", "T67.0XXA", "Z00.00"]

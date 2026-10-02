@@ -106,6 +106,25 @@ CHECKS = [
                 AND e.status = 'Completed'
                 AND e.activity_date > c.requested_date""",
           lambda v: v == 0, "Completed phone outreach dated after the member opted out"),
+
+    # --- claims ---
+    Check("claim_files_loaded", "error",
+          """SELECT COUNT(DISTINCT entity) FROM ops.load_audit
+             WHERE LEFT(entity, 7) = 'claims_' AND status = 'succeeded'
+               AND RIGHT(load_id, 10) = %(batch_date)s""",
+          lambda v: v >= len(HEALTH_PLANS), "Health-plan claims files loaded for this date"),
+    Check("duplicate_claim_ids", "error",
+          "SELECT COUNT(*) FROM (SELECT claim_id FROM core.claims GROUP BY 1 HAVING COUNT(*) > 1)",
+          lambda v: v == 0, "More than one current version of a claim in core.claims"),
+    Check("claims_unknown_member_pct", "warn",
+          """SELECT COALESCE(100.0 * SUM(CASE WHEN m.member_id IS NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 0)
+             FROM core.claims c
+             LEFT JOIN (SELECT DISTINCT member_id FROM core.member_eligibility) m ON m.member_id = c.member_id
+             WHERE c.service_from > %(batch_date)s::DATE - 365""",
+          lambda v: v <= 5, "% of last-12-month claims whose member isn't on any roster"),
+    Check("claims_future_service_dates", "warn",
+          "SELECT COUNT(*) FROM core.claims WHERE service_from > %(batch_date)s::DATE",
+          lambda v: v == 0, "Claims with a service date after the batch date (bad dates upstream)"),
 ]
 
 

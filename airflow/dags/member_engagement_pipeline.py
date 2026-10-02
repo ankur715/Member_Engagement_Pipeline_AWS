@@ -107,6 +107,21 @@ def member_engagement_pipeline():
         from pipeline.enrich import sdoh_rules
         return sdoh_rules.main(ds)
 
+    @task
+    def drop_claims_files(ds: str = None):
+        """Stand-in for health plans' daily claims extracts. The first run also
+        drops a 12-month history file, the way a new plan is onboarded."""
+        from pipeline import s3_io
+        from pipeline.sources import generate_claims
+        onboarded = any("_history_" in k for k in s3_io.list_keys(generate_claims.PREFIX + "/"))
+        return generate_claims.main(ds, history=not onboarded)
+
+    @task(pool=REDSHIFT_POOL)
+    def load_claims(ds: str = None):
+        # Normalize messy claims and keep the latest version of each claim.
+        from pipeline.ingest import claims
+        return claims.main(ds)
+
     @task(retries=0)  # a DQ failure is a data problem; retrying won't fix it
     def data_quality(ds: str = None):
         from pipeline.quality import data_quality as dq
@@ -129,13 +144,15 @@ def member_engagement_pipeline():
     events = ingest_events()
     dnc = ingest_contact_preferences()
     sdoh = tag_sdoh_needs()
+    claims = load_claims()
     dq = data_quality()
 
     # --- Wire the dependencies (">>" = "runs before") ---
     migrations >> drop_member_files() >> members          # schema first, then file drop, then load
     migrations >> [activities, events, dnc]               # the three API sources run in parallel
     activities >> sdoh                                    # tag notes only after they've landed
-    [members, sdoh, events, dnc] >> dq >> publish_plan_kpis()  # KPIs go out only if DQ passes
+    migrations >> drop_claims_files() >> claims           # claims extracts, then load
+    [members, sdoh, events, dnc, claims] >> dq >> publish_plan_kpis()  # KPIs go out only if DQ passes
 
 
 # Calling the decorated function registers the DAG with Airflow.

@@ -8,12 +8,15 @@ import pytest
 
 from pipeline.schemas import ALL_SPECS
 
-DDL = (Path(__file__).resolve().parents[1] / "sql" / "redshift" / "V003__staging_tables.sql").read_text()
+# Staging tables can be added by any migration (V003 created the first ones),
+# so read them all.
+SQL_DIR = Path(__file__).resolve().parents[1] / "sql" / "redshift"
+DDL = "\n".join(p.read_text() for p in sorted(SQL_DIR.glob("V*.sql")))
 
 
 def ddl_columns(table: str) -> list[str]:
     m = re.search(rf"CREATE TABLE IF NOT EXISTS staging\.{table} \((.*?)\n\);", DDL, re.S)
-    assert m, f"staging.{table} not found in V003"
+    assert m, f"staging.{table} not found in any migration"
     body = re.sub(r"--[^\n]*", "", m.group(1))
     return [col.strip().split()[0] for col in re.split(r",\s*\n", body) if col.strip()]
 
