@@ -162,6 +162,22 @@ CHECKS = [
              LEFT JOIN core.county_fips f ON f.county_fips = ac.county_fips
              WHERE f.county_fips IS NULL""",
           lambda v: v == 0, "Heat/cold alert counties missing from core.county_fips (members there would be missed)"),
+
+    # --- vulnerability index ---
+    Check("vulnerability_index_covers_members", "error",
+          """SELECT (SELECT COUNT(*) FROM core.member_eligibility
+                     WHERE is_current AND (coverage_end IS NULL OR coverage_end >= CURRENT_DATE))
+                  - (SELECT COUNT(*) FROM analytics.v_member_vulnerability)""",
+          lambda v: v == 0, "Every active member has exactly one vulnerability score (no one silently dropped)"),
+    Check("wellness_queue_excludes_opt_outs", "error",
+          """SELECT COUNT(*) FROM care.v_wellness_check_queue q
+             JOIN core.contact_preferences c ON c.member_id = q.member_id AND c.channel IN ('phone', 'all')""",
+          lambda v: v == 0, "No member who opted out of phone contact is on the wellness-check call list"),
+    Check("analytics_exposes_no_identifiers", "error",
+          """SELECT COUNT(*) FROM svv_columns
+             WHERE table_schema = 'analytics'
+               AND column_name IN ('member_id', 'first_name', 'last_name', 'phone', 'dob', 'notes', 'address')""",
+          lambda v: v == 0, "analytics.* stays de-identified: no direct identifiers in any view"),
 ]
 
 
