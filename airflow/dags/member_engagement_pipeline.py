@@ -136,6 +136,12 @@ def member_engagement_pipeline():
         from pipeline.ingest import hra
         return hra.main(ds)
 
+    @task(pool=REDSHIFT_POOL)
+    def ingest_housing_violations(ds: str = None):
+        # Public NYC Open Data: open HPD violations in member ZIPs (snapshot).
+        from pipeline.ingest import housing_violations
+        return housing_violations.main(ds)
+
     @task(retries=0)  # a DQ failure is a data problem; retrying won't fix it
     def data_quality(ds: str = None):
         from pipeline.quality import data_quality as dq
@@ -160,6 +166,7 @@ def member_engagement_pipeline():
     sdoh = tag_sdoh_needs()
     claims = load_claims()
     hra = load_hra()
+    housing = ingest_housing_violations()
     dq = data_quality()
 
     # --- Wire the dependencies (">>" = "runs before") ---
@@ -168,7 +175,8 @@ def member_engagement_pipeline():
     activities >> sdoh                                    # tag notes only after they've landed
     migrations >> drop_claims_files() >> claims           # claims extracts, then load
     migrations >> drop_hra_file() >> hra                  # HRA survey export, then load
-    [members, sdoh, events, dnc, claims, hra] >> dq >> publish_plan_kpis()  # KPIs go out only if DQ passes
+    members >> housing                                    # needs current member ZIPs
+    [members, sdoh, events, dnc, claims, hra, housing] >> dq >> publish_plan_kpis()  # KPIs go out only if DQ passes
 
 
 # Calling the decorated function registers the DAG with Airflow.

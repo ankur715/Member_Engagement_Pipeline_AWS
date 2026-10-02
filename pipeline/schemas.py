@@ -162,6 +162,18 @@ HRA_RESPONSES = StagingSpec("hra_responses", (
     ("source_file", pa.string()),
 ))
 
+# Open NYC HPD housing violations (public data) in member ZIPs.
+HOUSING_VIOLATIONS = StagingSpec("housing_violations", (
+    ("load_id", pa.string()),
+    ("violation_id", pa.string()),
+    ("zip", pa.string()),
+    ("boro", pa.string()),
+    ("violation_class", pa.string()),
+    ("is_heat_hot_water", pa.bool_()),
+    ("inspection_date", pa.date32()),
+    ("nov_description", pa.string()),
+))
+
 # Every contract, so tests can check each one against the staging DDL.
 ALL_SPECS = (MEMBER_ELIGIBILITY, ENGAGEMENTS, EVENTS, EVENT_ATTENDANCE, CONTACT_PREFERENCES,
-             MEMBER_SDOH_NEEDS, NOTE_CLASSIFICATIONS, CLAIMS, HRA_RESPONSES)
+             MEMBER_SDOH_NEEDS, NOTE_CLASSIFICATIONS, CLAIMS, HRA_RESPONSES, HOUSING_VIOLATIONS)

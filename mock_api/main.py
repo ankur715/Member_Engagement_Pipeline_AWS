@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import random
+import re
 from datetime import date, datetime, time, timedelta, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
@@ -319,3 +320,55 @@ def sheet_values(sheet_id: str, sheet_range: str):
 def health():
     # Unauthenticated liveness check (used to confirm the server is up).
     return {"status": "ok"}
+
+
+# ------------------------------------------------- NYC Open Data (HPD violations)
+# Same path and field names as the real Socrata dataset (wvxf-dwi5). Public
+# data in reality, so -- like the real API -- no bearer token is required.
+
+HPD_CODES = [
+    ("C", True,  "§ 27-2029 ADM CODE PROVIDE AN ADEQUATE SUPPLY OF HEAT FOR THE APARTMENT IN THE ENTIRE APARTMENT"),
+    ("C", True,  "§ 27-2031 ADMIN. CODE: PROVIDE HOT WATER AT ALL HOT WATER FIXTURES IN THE ENTIRE APARTMENT"),
+    ("C", False, "§ 27-2017.4 ADM CODE ABATE THE INFESTATION CONSISTING OF MICE IN THE ENTIRE APARTMENT"),
+    ("B", False, "§ 27-2017.3 HMC: TRACE AND CORRECT THE CONDITIONS CAUSING MOLD IN THE BATHROOM"),
+    ("B", False, "§ 27-2005 ADM CODE REPAIR THE BROKEN OR DEFECTIVE PLASTERED SURFACES IN THE KITCHEN"),
+    ("A", False, "§ 27-2046.1 HMC: REPAIR THE SMOKE DETECTOR IN THE HALLWAY"),
+]
+NYC_BOROS = {"Kings": "BROOKLYN", "Queens": "QUEENS", "Bronx": "BRONX"}
+
+
+def hpd_violations(today: date) -> list[dict]:
+    """Open violations for NYC ZIPs where members live. Some ZIPs are much
+    worse than others (deterministic per ZIP), with the usual export mess."""
+    rows = []
+    zips = sorted({(m["zip"], m["county"]) for m in member_roster() if m["county"] in NYC_BOROS})
+    for zip_code, county in zips:
+        rng = random.Random(_hash_int("hpd-" + zip_code))
+        for n in range(rng.choice([2, 5, 10, 25, 40])):            # bad buildings cluster by ZIP
+            cls, _heat, desc = rng.choices(HPD_CODES, weights=[3, 2, 2, 3, 3, 1])[0]
+            inspected = today - timedelta(days=rng.randint(5, 900))
+            zip_out = rng.choice([zip_code] * 8 + [f"{zip_code}-{rng.randint(1000, 9999)}", ""])
+            rows.append({
+                "violationid": str(10_000_000 + _hash_int(f"{zip_code}-{n}") % 9_000_000),
+                "zip": zip_out,                                     # ZIP+4 or blank sometimes
+                "boro": NYC_BOROS[county],
+                "class": cls.lower() if rng.random() < 0.05 else cls,
+                "inspectiondate": inspected.strftime("%Y-%m-%dT00:00:00.000"),   # Socrata floating timestamp
+                "novdescription": desc,
+                "violationstatus": "Open",
+                "currentstatus": rng.choice(["NOV SENT OUT", "FIRST NO ACCESS TO RE- INSPECT VIOLATION"]),
+            })
+    return sorted(rows, key=lambda r: r["violationid"])
+
+
+@app.get("/resource/wvxf-dwi5.json")
+def socrata_hpd(where: str | None = Query(default=None, alias="$where"),
+                limit: int = Query(default=1000, alias="$limit"),
+                offset: int = Query(default=0, alias="$offset")):
+    rows = hpd_violations(_now().date())
+    # Minimal SoQL support: honour "zip in ('11201', ...)" -- everything we return is Open.
+    m = re.search(r"zip\s+in\s*\(([^)]*)\)", where or "", re.I)
+    if m:
+        wanted = {z.strip().strip("'\"") for z in m.group(1).split(",")}
+        rows = [r for r in rows if r["zip"][:5] in wanted or r["zip"] == ""]
+    return rows[offset:offset + limit]                              # Socrata returns a bare JSON list

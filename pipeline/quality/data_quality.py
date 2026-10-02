@@ -144,6 +144,11 @@ CHECKS = [
                ON h.member_id = m.member_id AND h.submitted_at > %(batch_date)s::DATE - 365
              WHERE m.is_current""",
           lambda v: v >= 50, "% of current members with an HRA in the last 12 months"),
+
+    # --- public data: NYC housing violations ---
+    Check("housing_violations_present", "warn",
+          "SELECT COUNT(*) FROM core.housing_violations",
+          lambda v: v > 0, "Open NYC housing violations loaded for member ZIPs (0 = pull likely failed)"),
 ]
 
 

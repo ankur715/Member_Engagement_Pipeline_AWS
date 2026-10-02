@@ -7,7 +7,7 @@ from urllib3.util.retry import Retry
 from pipeline import config
 
 
-def session(token: str | None = None) -> requests.Session:
+def session(token: str | None = None, auth: bool = True) -> requests.Session:
     s = requests.Session()  # reuses TCP connections across paginated calls
     retry = Retry(
         total=4,                     # up to 4 retries per request
@@ -19,7 +19,8 @@ def session(token: str | None = None) -> requests.Session:
     adapter = HTTPAdapter(max_retries=retry)
     s.mount("http://", adapter)      # apply the retry policy to every http:// URL...
     s.mount("https://", adapter)     # ...and every https:// URL
-    s.headers["Authorization"] = f"Bearer {token or config.MOCK_API_TOKEN}"  # auth on every request
+    if auth:  # public open-data APIs take no bearer token (auth=False)
+        s.headers["Authorization"] = f"Bearer {token or config.MOCK_API_TOKEN}"
     return s
 
 
