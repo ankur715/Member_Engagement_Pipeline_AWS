@@ -125,6 +125,25 @@ CHECKS = [
     Check("claims_future_service_dates", "warn",
           "SELECT COUNT(*) FROM core.claims WHERE service_from > %(batch_date)s::DATE",
           lambda v: v == 0, "Claims with a service date after the batch date (bad dates upstream)"),
+
+    # --- HRA surveys ---
+    Check("hra_file_loaded", "error",
+          """SELECT COUNT(*) FROM ops.load_audit
+             WHERE entity = 'hra_responses' AND status = 'succeeded'
+               AND RIGHT(load_id, 10) = %(batch_date)s""",
+          lambda v: v >= 1, "Survey vendor's HRA file loaded for this date"),
+    Check("hra_unknown_member_pct", "warn",
+          """SELECT COALESCE(100.0 * SUM(CASE WHEN m.member_id IS NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 0)
+             FROM core.hra_responses h
+             LEFT JOIN (SELECT DISTINCT member_id FROM core.member_eligibility) m ON m.member_id = h.member_id""",
+          lambda v: v <= 5, "% of HRA responses whose member isn't on any roster"),
+    Check("hra_coverage_pct", "warn",
+          """SELECT COALESCE(100.0 * COUNT(DISTINCT h.member_id) / NULLIF(COUNT(DISTINCT m.member_id), 0), 0)
+             FROM core.member_eligibility m
+             LEFT JOIN core.hra_responses h
+               ON h.member_id = m.member_id AND h.submitted_at > %(batch_date)s::DATE - 365
+             WHERE m.is_current""",
+          lambda v: v >= 50, "% of current members with an HRA in the last 12 months"),
 ]
 
 

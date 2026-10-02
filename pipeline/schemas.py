@@ -146,6 +146,22 @@ CLAIMS = StagingSpec("claims", (
     ("source_file", pa.string()),
 ))
 
+# Health risk assessment survey responses (normalized answers).
+HRA_RESPONSES = StagingSpec("hra_responses", (
+    ("load_id", pa.string()),
+    ("response_id", pa.string()),
+    ("member_id", pa.string()),
+    ("submitted_at", TS),
+    ("updated_at", TS),
+    ("is_complete", pa.bool_()),
+    ("lives_alone", pa.bool_()),
+    ("mobility_level", pa.string()),
+    ("has_working_heat", pa.bool_()),
+    ("has_ac", pa.bool_()),
+    ("utility_cost_burden", pa.bool_()),
+    ("source_file", pa.string()),
+))
+
 # Every contract, so tests can check each one against the staging DDL.
 ALL_SPECS = (MEMBER_ELIGIBILITY, ENGAGEMENTS, EVENTS, EVENT_ATTENDANCE, CONTACT_PREFERENCES,
-             MEMBER_SDOH_NEEDS, NOTE_CLASSIFICATIONS, CLAIMS)
+             MEMBER_SDOH_NEEDS, NOTE_CLASSIFICATIONS, CLAIMS, HRA_RESPONSES)

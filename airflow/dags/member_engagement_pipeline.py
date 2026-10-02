@@ -122,6 +122,20 @@ def member_engagement_pipeline():
         from pipeline.ingest import claims
         return claims.main(ds)
 
+    @task
+    def drop_hra_file(ds: str = None):
+        """Stand-in for the survey vendor's daily HRA export (12-month history on first run)."""
+        from pipeline import s3_io
+        from pipeline.sources import generate_hra
+        onboarded = any("_history_" in k for k in s3_io.list_keys(generate_hra.PREFIX + "/"))
+        return generate_hra.main(ds, history=not onboarded)
+
+    @task(pool=REDSHIFT_POOL)
+    def load_hra(ds: str = None):
+        # Normalize survey answers (lives alone, mobility, heat/AC, utility costs).
+        from pipeline.ingest import hra
+        return hra.main(ds)
+
     @task(retries=0)  # a DQ failure is a data problem; retrying won't fix it
     def data_quality(ds: str = None):
         from pipeline.quality import data_quality as dq
@@ -145,6 +159,7 @@ def member_engagement_pipeline():
     dnc = ingest_contact_preferences()
     sdoh = tag_sdoh_needs()
     claims = load_claims()
+    hra = load_hra()
     dq = data_quality()
 
     # --- Wire the dependencies (">>" = "runs before") ---
@@ -152,7 +167,8 @@ def member_engagement_pipeline():
     migrations >> [activities, events, dnc]               # the three API sources run in parallel
     activities >> sdoh                                    # tag notes only after they've landed
     migrations >> drop_claims_files() >> claims           # claims extracts, then load
-    [members, sdoh, events, dnc, claims] >> dq >> publish_plan_kpis()  # KPIs go out only if DQ passes
+    migrations >> drop_hra_file() >> hra                  # HRA survey export, then load
+    [members, sdoh, events, dnc, claims, hra] >> dq >> publish_plan_kpis()  # KPIs go out only if DQ passes
 
 
 # Calling the decorated function registers the DAG with Airflow.
