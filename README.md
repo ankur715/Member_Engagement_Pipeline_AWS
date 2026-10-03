@@ -7,7 +7,9 @@ members and log the work in Salesforce, members attend community events, and
 each plan gets monthly program KPIs back. On top of that, a **Neighborhood
 Vulnerability Index** combines claims, health risk assessments, NYC
 housing-violation data and NOAA weather alerts to flag which members need
-a wellness check before extreme heat or cold.
+a wellness check before extreme heat or cold. And **LLM utilities** built
+on Claude through **Amazon Bedrock** tag CHW notes, explain data quality
+failures, and turn analysts' questions into safe SQL.
 
 Built on **S3 + IAM + Redshift Serverless**, with **pandas/SQL** pipelines,
 **Airflow** orchestration (replacing a legacy cron job), ingestion from
@@ -43,6 +45,9 @@ trial AWS account.
   └──────────────────────────────────────────┬───────────────────────────────────────────────┘
                                               ▼
                         Google Sheets (per-plan KPI tabs) + CSV export
+
+  Amazon Bedrock (Claude, us-east-1) <── LLM utilities: CHW note tagging, data quality
+                                          triage notes, natural-language SQL over analytics.*
 ```
 
 Orchestrated by Airflow (`airflow/dags/member_engagement_pipeline.py`):
@@ -50,7 +55,7 @@ Orchestrated by Airflow (`airflow/dags/member_engagement_pipeline.py`):
 ```
 apply_migrations ─┬─> drop_member_files ─> load_member_files (SCD2, depends_on_past) ─┬─> ingest_housing_violations ─┐
                   │                                                                    └──────────────────────────────┤
-                  ├─> ingest_salesforce_activities ─> tag_sdoh_needs ─────────────────────────────────────────────────┤
+                  ├─> ingest_salesforce_activities ─> tag_sdoh_needs ─> classify_notes_llm ───────────────────────────┤
                   ├─> ingest_events ──────────────────────────────────────────────────────────────────────────────────┤
                   ├─> ingest_contact_preferences ─────────────────────────────────────────────────────────────────────┼─> data_quality ─> publish_plan_kpis
                   ├─> drop_claims_files ─> load_claims ───────────────────────────────────────────────────────────────┤
@@ -74,7 +79,7 @@ Mapped against the [Healthcare Data Engineer posting](https://apply.workable.com
 | Performant Redshift SQL: DDL, DML, stored procedures | `sql/redshift/V002`–`V013`: dist/sort keys, `MERGE`, SCD2, latest-version claim merges, snapshot replaces |
 | Manage schemas, views, permissions, table evolution safely | Checksummed migration runner (`pipeline/migrate.py`), fix-forward migrations, RBAC roles, dynamic data masking |
 | Debug production data issues | `ops.load_audit` (every load's source, rows in/staged/rejected, failures), raw payloads kept in S3 for replay |
-| Data quality, freshness, lineage, observability | 25 checks → `ops.dq_results`; per-source SLAs → `ops.v_sla_status`; `source_file`/`source_uri` lineage |
+| Data quality, freshness, lineage, observability | 26 checks → `ops.dq_results`; per-source SLAs → `ops.v_sla_status`; `source_file`/`source_uri` lineage |
 | PHI/PII safeguards | HMAC member tokens, de-identified analytics (enforced by a DQ check on the column catalog), masking, TLS-only encrypted bucket, least-privilege IAM, no PHI in logs |
 | Migrate cron → orchestration | `legacy/crontab` + `legacy/run_nightly.sh` (before) → the DAG (after); see [Cron → Airflow](#cron--airflow) |
 | Idempotent, retry-safe jobs | Every load is one Redshift transaction; natural-key merges; watermarks advance in the same transaction |
@@ -82,6 +87,7 @@ Mapped against the [Healthcare Data Engineer posting](https://apply.workable.com
 | BI, reporting, Google Sheets integrations | `pipeline/publish/plan_kpis.py`: per-plan tabs, idempotent month upsert, S3 archive |
 | Healthcare data: claims, eligibility, HRAs | SCD2 eligibility rosters; claims with replacement/void versioning; HRA surveys |
 | Complex data integration | Vulnerability index joins claims, HRAs, CHW notes, ZIP-level housing data and county-level weather alerts |
+| Lightweight AI/LLM utilities: metadata extraction, SQL generation, anomaly explanation | [LLM utilities](#llm-utilities): Claude via Amazon Bedrock tags CHW notes, writes data quality triage notes, and answers questions with validated SQL |
 | AWS S3, IAM, Redshift | `infra/terraform/` |
 | Git, CI-friendly development | Feature branches, tagged releases, `.github/workflows/ci.yml` (unit tests, DAG tests, `terraform validate`) |
 
@@ -318,6 +324,95 @@ ZIPs don't match real NYC ZIPs, so live HPD data needs real member ZIPs.
 In production, weather alerts would be pulled every 1–2 hours rather than
 with the daily batch.
 
+## LLM utilities
+
+Three small, practical uses of an LLM (Claude), one for each example in the
+job posting, each built to save analyst or engineer time without becoming
+a dependency. All calls go through one wrapper,
+[`pipeline/ai/llm.py`](pipeline/ai/llm.py), which talks to **Amazon
+Bedrock** with the same AWS credentials as the rest of the project
+(`LLM_PROVIDER=bedrock`), or to the Claude API (`LLM_PROVIDER=anthropic`).
+With `LLM_PROVIDER=none` (the default), every LLM step skips cleanly, so
+the pipeline and CI never need a model.
+
+| Use | What it does | Where |
+|---|---|---|
+| **Metadata extraction** | Tags CHW notes with the same six social-need categories as the rule-based tagger, stored as a second `method` (`llm`) so the two can be compared note by note | `pipeline/enrich/sdoh_llm.py`, Airflow task `classify_notes_llm`, `analytics.v_sdoh_method_agreement` |
+| **Anomaly explanation** | When data quality checks fail, writes a short triage note (likely cause, first thing to check), stored in `ops.dq_results` and appended to the alert email | `pipeline/quality/data_quality.py` |
+| **SQL generation** | `python -m pipeline.ai.ask "question"` turns a question into one Redshift `SELECT` over the de-identified `analytics.*` views, validates it, and runs it | `pipeline/ai/ask.py` |
+
+**Safeguards**
+- **Structured outputs** (Pydantic, `messages.parse`): the note tagger can
+  only answer with the fixed category list; the SQL assistant returns
+  `sql` / `explanation` / `answerable` fields, never free text to scrape.
+- **PHI:** notes are redacted (`phi.redact`) before sending. With
+  `SYNTHETIC_DATA=false`, raw notes may only go to Bedrock, which is covered
+  by the AWS BAA and keeps traffic in the AWS account, never the direct API.
+  Triage notes receive aggregates only (check names, values, load counts).
+- **SQL guardrails, independent of the model:** the prompt only describes
+  `analytics.*`; `validate_sql()` allows a single `SELECT` that reads only
+  analytics views or CTEs, rejecting DML, DDL, other schemas, system catalogs
+  and multiple statements; execution uses a timeout and a row cap and is
+  rolled back.
+- **Advisory, not authoritative:** the vulnerability index keeps using the
+  rule-based tags until the agreement view has been reviewed; triage notes
+  are labeled "LLM-generated, verify before acting".
+- **Cost:** low effort, 20 notes per request, at most `LLM_MAX_NOTES_PER_RUN`
+  notes per run, and only new or edited notes are sent. The whole live test
+  cost about 3 cents.
+- **Resilience:** refusals and API errors never fail the DAG. On the Claude
+  API, server-side fallbacks retry a declined request on another Claude
+  model.
+
+**Live on Bedrock.** The default model is `claude-opus-5-5`. This new AWS
+account could only call Claude Haiku 4.5 on Bedrock, through an inference
+profile on `bedrock-runtime`, so the live test ran there. The wrapper takes
+any model, endpoint or profile from `.env`
+(`LLM_MODEL=us.anthropic.claude-haiku-4-5-20251001-v1:0`,
+`LLM_BEDROCK_ENDPOINT=runtime`). The first live run caught two things the
+offline tests couldn't, both fixed:
+- The SQL assistant filtered `vulnerability_tier = 'High'` while the data
+  says `'high'`, which returned no rows. The prompt now includes the exact
+  values of categorical columns, a small semantic layer.
+- The triage note came back in Markdown, which renders as raw asterisks in
+  an email. The prompt now requires plain text.
+
+**SQL generation:** a question in, validated SQL and the answer out.
+
+![SQL assistant](pics/llm_sql_assistant.jpg)
+
+**The same assistant declining a request for PHI** that the de-identified
+views don't contain.
+
+![SQL assistant guardrail](pics/llm_sql_guardrail.jpg)
+
+**Anomaly explanation:** all checks, then the LLM's triage note. It noticed
+that both warnings have been flat for days rather than spiking today. It
+also illustrates why notes are advisory: in another run it described an
+unchanged value as a "slight rise".
+
+![DQ triage note](pics/llm_dq_triage_note.jpg)
+
+**The triage note stored with each failed check** in `ops.dq_results`.
+
+![Triage stored](pics/llm_triage_stored.jpg)
+
+**Metadata extraction: rules vs. LLM agreement per category.** 100% here
+because the synthetic notes come from a fixed set of templates the rules
+were written against; on real, varied notes, this view is where the methods
+would diverge and get reviewed.
+
+![Method agreement](pics/llm_method_agreement.jpg)
+
+**Tags by method.** The LLM counts are lower only because this test capped
+it at 40 notes, while the rules cover every note.
+
+![Tags by method](pics/llm_tags_by_method.jpg)
+
+**Lineage:** the load audit records which model produced the tags.
+
+![LLM load audit](pics/llm_load_audit.jpg)
+
 ## Design decisions worth talking about
 
 **Redshift doesn't enforce keys, so idempotency lives in the load pattern.**
@@ -392,7 +487,7 @@ in parallel.
 
 ## Data quality & SLAs
 
-`pipeline/quality/data_quality.py` runs 25 checks after every load and writes each result to `ops.dq_results`.
+`pipeline/quality/data_quality.py` runs 26 checks after every load and writes each result to `ops.dq_results`. When checks fail and an LLM is configured, a short triage note is added (see [LLM utilities](#llm-utilities)).
 
 | Kind | Checks |
 |---|---|
@@ -407,6 +502,7 @@ in parallel.
 | HRA | vendor file loaded (error) · unknown members · ≥50% of members surveyed in 12 months |
 | Public data (warn) | housing violations present · weather pulled today · alert counties all mapped to FIPS |
 | Vulnerability index (error) | every active member scored once · no phone opt-outs on the wellness queue · no identifiers in `analytics.*` |
+| LLM drift (warn) | LLM and rule-based note tags agree on at least 70% of tags |
 
 Error-level failures fail the run, so KPIs are never published on bad data.
 The failure alert email includes each failed check and its observed value.
@@ -480,6 +576,7 @@ python -m pipeline.ingest.salesforce_activities $D
 python -m pipeline.ingest.events $D
 python -m pipeline.ingest.contact_preferences $D
 python -m pipeline.enrich.sdoh_rules $D
+python -m pipeline.enrich.sdoh_llm $D          # optional: skips unless LLM_PROVIDER is set
 python -m pipeline.sources.generate_claims $D --history   # --history only the first time
 python -m pipeline.ingest.claims $D
 python -m pipeline.sources.generate_hra $D --history
@@ -488,6 +585,16 @@ python -m pipeline.ingest.housing_violations $D
 python -m pipeline.ingest.weather_alerts $D
 python -m pipeline.quality.data_quality $D
 python -m pipeline.publish.plan_kpis $D
+```
+
+**LLM utilities (optional).** In `.env`, set `LLM_PROVIDER=bedrock` (uses
+your AWS credentials) or `LLM_PROVIDER=anthropic` (uses `ANTHROPIC_API_KEY`).
+On Bedrock, Anthropic requires a one-time use-case form per AWS account
+(Bedrock console → Model catalog → any Claude model → *Submit use case
+details*). Then:
+
+```bash
+python -m pipeline.ai.ask "Which county has the most high-vulnerability members?"
 ```
 
 **Airflow** (separate venv; Airflow pins its own dependency set):
@@ -507,7 +614,7 @@ airflow standalone          # http://localhost:8080, unpause member_engagement_p
 ## Tests
 
 ```bash
-pytest -q tests                                   # 115 unit tests, no AWS or internet needed (moto + FastAPI TestClient)
+pytest -q tests                                   # 165 unit tests, no AWS, internet or LLM needed (moto, FastAPI TestClient, a fake Claude client)
 cd airflow && pytest -q tests                     # DAG integrity (needs the Airflow venv + env vars above)
 ```
 
@@ -516,14 +623,17 @@ detection, Salesforce/events pagination and flattening, DNC sheet cleanup,
 SDoH rules, claims cleanup and restatement rates, HRA answer
 normalization, Socrata paging and HPD cleanup, NWS alert parsing and
 county mapping, the Parquet ↔ DDL contract, transaction shape and rollback
-for loads, migration checksums, and KPI upserts. CI runs the unit tests, the
+for loads, migration checksums, KPI upserts, and the LLM utilities (client
+settings, refusals, redaction, batching, SQL validation) against a fake
+Claude client. CI runs the unit tests, the
 DAG tests, and `terraform validate` on every push.
 
 **Verified on live AWS.** `terraform apply` built all 15 resources, and
-migrations V001-V013 applied on Redshift Serverless, including the stored
+migrations V001-V015 applied on Redshift Serverless, including the stored
 procedures, `MERGE`, roles and dynamic data masking. A full pipeline day
-then ran end to end. The first live run surfaced three things the local
-tests couldn't:
+then ran end to end, and the LLM utilities ran live on Amazon Bedrock. The
+live runs surfaced four things in the core pipeline that the local tests
+couldn't (the LLM fixes are listed under [LLM utilities](#llm-utilities)):
 - Redshift rejects multi-statement batches where a later statement depends
   on an earlier one, so `migrate.py` now splits files into single
   statements, respecting `$$` procedure bodies.
@@ -538,10 +648,10 @@ tests couldn't:
 
 ## Roadmap
 
-- **LLM utilities (next).** Add an LLM classifier for CHW notes as a second
-  `method` next to the rule-based one, so the two can be compared on the
-  same notes. Also an anomaly-explanation note in DQ failure alerts. Notes
-  are PHI, so this path would use Amazon Bedrock under the AWS BAA.
+- **LLM next steps.** Switch to `claude-opus-5-5` once the AWS account is
+  eligible on Bedrock (one `.env` line); build a small hand-labeled set of
+  varied notes to measure the LLM tagger properly; use the Message Batches
+  API for bulk re-tagging at lower cost.
 - **Production hardening.** Secrets Manager instead of `.env`, a
   VPC-private Redshift workgroup with Airflow on MWAA or ECS, and AWS
   Transfer Family for health-plan SFTP drops.
@@ -550,13 +660,14 @@ tests couldn't:
 
 ```
 infra/terraform/     S3 lake, IAM (least privilege), Redshift Serverless, usage limit, budget
-sql/redshift/        V001-V013 versioned migrations (schemas, tables, staging, ops/SLAs, procedures, views, RBAC,
-                     claims, HRA, housing violations, weather alerts, vulnerability index)
+sql/redshift/        V001-V015 versioned migrations (schemas, tables, staging, ops/SLAs, procedures, views, RBAC,
+                     claims, HRA, housing violations, weather alerts, vulnerability index, LLM agreement)
 pipeline/            config, s3_io, redshift, loaders (Parquet->COPY->MERGE), schemas, phi, migrate, watermarks, http
   sources/           simulators: health-plan rosters, claims extracts, HRA survey exports
   ingest/            member_files, salesforce_activities, events, contact_preferences,
                      claims, hra, housing_violations, weather_alerts
-  enrich/            sdoh_rules
+  enrich/            sdoh_rules, sdoh_llm (LLM note tagging)
+  ai/                llm (Claude via Bedrock or the Claude API), ask (natural-language SQL)
   quality/           data_quality
   publish/           plan_kpis (Google Sheets + S3 export)
 mock_api/            Salesforce / events / Google Sheets / NYC Open Data / NWS stand-ins (FastAPI)
