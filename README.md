@@ -88,57 +88,109 @@ Mapped against the [Healthcare Data Engineer posting](https://apply.workable.com
 ## Screenshots
 
 Deployed with Terraform to a real AWS account and run end to end against
-Redshift Serverless.
+Redshift Serverless. (Member names and phone numbers anywhere in this
+project are synthetic Faker data; these queries leave them out anyway.)
 
-**The Airflow DAG at v1.0, one full daily run, all 9 tasks green.** (The
-vulnerability-index sources add 6 more tasks; see the diagram above.) Migrations
-run first; the roster load and the three API sources follow, with the
-sources in parallel; social-needs tagging waits for Salesforce; data
-quality gates the KPI publish.
+### Orchestration
 
-![Airflow DAG graph](pics/airflow_dag_graph.jpg)
+**The Airflow DAG: one full daily run, all 15 tasks green on the first try,
+in about 90 seconds.** Migrations run first; the roster load, the
+Salesforce/events/Sheets pulls, the claims and HRA drops and the public
+housing and weather pulls fan out from there; social-needs tagging waits
+for Salesforce; housing waits for member ZIPs; data quality gates the KPI
+publish.
 
-**The same run in the Grid view:** per-task start times and durations. The
-whole pipeline takes under 2 minutes, with every task succeeding on its
-first try.
+![Airflow DAG graph](pics/v2_airflow_dag_graph.jpg)
 
-![Airflow DAG grid](pics/airflow_dag_grid.jpg)
+### Neighborhood Vulnerability Index
+
+**The wellness-check call list during a heat scenario.** Members in
+counties under an active Heat Advisory or Extreme Heat Warning, ranked by
+vulnerability, each with the reasons to call. Phone opt-outs and members
+a CHW already reached since the alert began are excluded.
+
+![Wellness-check queue](pics/v2_query_wellness_queue.jpg)
+
+**Explainable scoring, de-identified.** Each factor's points per member
+(shortened member token, 3-digit ZIP, age band). Nassau and Westchester
+have no active alert in this scenario, so their members score on their
+baseline factors only.
+
+![Vulnerability points](pics/v2_query_vulnerability_points.jpg)
+
+**Risk tiers by county and alert status.**
+
+![Tier summary](pics/v2_query_tier_summary.jpg)
+
+### The four new sources
+
+**Claims, latest version per claim.** Replacements and voids are applied,
+so voided claims carry negative paid amounts and never double count.
+
+![Claims versions](pics/v2_query_claims_versions.jpg)
+
+**HRA survey answers after normalization** (lives alone, no AC, no
+reliable heat, by mobility level).
+
+![HRA answers](pics/v2_query_hra_answers.jpg)
+
+**NYC ZIPs with the most open housing violations** (public HPD data):
+total open, class C (immediately hazardous) and heat/hot water.
+
+![ZIP housing conditions](pics/v2_query_zip_housing.jpg)
+
+**Heat alerts in effect, by county** (NOAA/NWS). Alerts issued on
+consecutive days overlap, and each issuance has its own NWS id, which
+is how the merge keeps alert history.
+
+![Active weather alerts](pics/v2_query_weather_alerts.jpg)
+
+### Member engagement
 
 **Monthly program KPIs per health plan**: what each customer receives
 (`analytics.v_plan_monthly_kpis`).
 
 ![Plan KPIs](pics/query_plan_kpis.jpg)
 
-**Data quality results for one batch.** Integrity and completeness checks
-pass. The three warnings are real findings: CHW activities for members
-who aren't on any roster, opt-out requests in notes that never reached the
-DNC sheet, and completed calls dated after an opt-out.
-
-![Data quality results](pics/query_dq_results.jpg)
-
-**Freshness SLAs per source** (`ops.v_sla_status`).
-
-![SLA status](pics/query_sla_status.jpg)
-
-**Load audit: lineage and observability.** Every load records its
-source, rows in, rows staged, rows rejected and status. The roster files
-show 34 rows in per plan: 30 loaded, 2 duplicates collapsed and 2 rejected to S3.
-
-![Load audit](pics/query_load_audit.jpg)
-
 **Social needs identified in CHW notes, by county** (de-identified).
 
 ![SDoH needs by county](pics/query_sdoh_needs.jpg)
 
 **Care team outreach queue**, prioritized by never-reached members and recent
-social needs, with opted-out members excluded. The names and phone
-numbers are synthetic (Faker).
+social needs, with opted-out members excluded.
 
 ![Outreach queue](pics/query_outreach_queue.jpg)
 
 **Member feature table for Data Science** (`analytics.v_ml_member_features`).
 
 ![ML feature table](pics/query_ml_features.jpg)
+
+### Reliability and observability
+
+**All 25 data quality checks for a full day.** Every error-level check
+passes; the two warnings are real compliance findings the mock data
+triggers on purpose (opt-outs mentioned in CHW notes but missing from the
+DNC sheet, and calls dated after an opt-out).
+
+![Data quality results](pics/v2_query_dq_results.jpg)
+
+**Freshness SLAs for all 9 sources** (`ops.v_sla_status`).
+
+![SLA status](pics/v2_query_sla_status.jpg)
+
+**Load audit: lineage per load.** Every load records its source, rows in,
+rows staged, rows rejected and status. The roster files show 34 rows in
+per plan: 30 loaded, 2 duplicates collapsed and 2 rejected to S3.
+
+![Load audit](pics/query_load_audit.jpg)
+
+**Safe schema evolution.** All 13 migrations applied in order, each with a
+checksum, including the V008 fix-forward and the V009-V013 vulnerability
+index work.
+
+![Schema migrations](pics/v2_query_migrations.jpg)
+
+### Infrastructure and cost
 
 **Redshift Serverless scaling to zero.** RPU capacity jumps to 8 while
 queries run and drops back to 0 in between, which is why this runs on
@@ -152,11 +204,26 @@ credits cover the usage.
 
 ![AWS Budgets](pics/budgets.jpg)
 
-**The S3 data lake**: top-level zones, and one prefix per source under `raw/`.
+**The S3 data lake**: top-level zones, one raw folder per source (7), and
+a rejects folder per source for rows that failed validation.
 
 ![S3 lake zones](pics/s3_lake_prefixes.jpg)
 
-![S3 raw sources](pics/s3_raw_sources.jpg)
+![S3 raw sources](pics/v2_s3_raw_sources.jpg)
+
+![S3 rejects](pics/v2_s3_rejects.jpg)
+
+### Engineering workflow
+
+**The feature built as 7 reviewable commits and merged through a pull
+request.**
+
+![PR commits](pics/v2_github_pr_commits.jpg)
+
+**CI on the pull request:** unit tests, DAG integrity tests and
+`terraform validate`, all green.
+
+![CI checks](pics/v2_github_ci_checks.jpg)
 
 ## Data sources
 
