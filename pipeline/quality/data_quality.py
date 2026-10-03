@@ -106,6 +106,78 @@ CHECKS = [
                 AND e.status = 'Completed'
                 AND e.activity_date > c.requested_date""",
           lambda v: v == 0, "Completed phone outreach dated after the member opted out"),
+
+    # --- claims ---
+    Check("claim_files_loaded", "error",
+          """SELECT COUNT(DISTINCT entity) FROM ops.load_audit
+             WHERE LEFT(entity, 7) = 'claims_' AND status = 'succeeded'
+               AND RIGHT(load_id, 10) = %(batch_date)s""",
+          lambda v: v >= len(HEALTH_PLANS), "Health-plan claims files loaded for this date"),
+    Check("duplicate_claim_ids", "error",
+          "SELECT COUNT(*) FROM (SELECT claim_id FROM core.claims GROUP BY 1 HAVING COUNT(*) > 1)",
+          lambda v: v == 0, "More than one current version of a claim in core.claims"),
+    Check("claims_unknown_member_pct", "warn",
+          """SELECT COALESCE(100.0 * SUM(CASE WHEN m.member_id IS NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 0)
+             FROM core.claims c
+             LEFT JOIN (SELECT DISTINCT member_id FROM core.member_eligibility) m ON m.member_id = c.member_id
+             WHERE c.service_from > %(batch_date)s::DATE - 365""",
+          lambda v: v <= 5, "% of last-12-month claims whose member isn't on any roster"),
+    Check("claims_future_service_dates", "warn",
+          "SELECT COUNT(*) FROM core.claims WHERE service_from > %(batch_date)s::DATE",
+          lambda v: v == 0, "Claims with a service date after the batch date (bad dates upstream)"),
+
+    # --- HRA surveys ---
+    Check("hra_file_loaded", "error",
+          """SELECT COUNT(*) FROM ops.load_audit
+             WHERE entity = 'hra_responses' AND status = 'succeeded'
+               AND RIGHT(load_id, 10) = %(batch_date)s""",
+          lambda v: v >= 1, "Survey vendor's HRA file loaded for this date"),
+    Check("hra_unknown_member_pct", "warn",
+          """SELECT COALESCE(100.0 * SUM(CASE WHEN m.member_id IS NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 0)
+             FROM core.hra_responses h
+             LEFT JOIN (SELECT DISTINCT member_id FROM core.member_eligibility) m ON m.member_id = h.member_id""",
+          lambda v: v <= 5, "% of HRA responses whose member isn't on any roster"),
+    Check("hra_coverage_pct", "warn",
+          """SELECT COALESCE(100.0 * COUNT(DISTINCT h.member_id) / NULLIF(COUNT(DISTINCT m.member_id), 0), 0)
+             FROM core.member_eligibility m
+             LEFT JOIN core.hra_responses h
+               ON h.member_id = m.member_id AND h.submitted_at > %(batch_date)s::DATE - 365
+             WHERE m.is_current""",
+          lambda v: v >= 50, "% of current members with an HRA in the last 12 months"),
+
+    # --- public data: NYC housing violations ---
+    Check("housing_violations_present", "warn",
+          "SELECT COUNT(*) FROM core.housing_violations",
+          lambda v: v > 0, "Open NYC housing violations loaded for member ZIPs (0 = pull likely failed)"),
+
+    # --- public data: NOAA weather alerts ---
+    Check("weather_alerts_pulled_today", "warn",
+          """SELECT COUNT(*) FROM ops.load_audit
+             WHERE entity = 'weather_alerts' AND status = 'succeeded'
+               AND RIGHT(load_id, 10) = %(batch_date)s""",
+          lambda v: v >= 1, "NWS alerts pulled for this date (zero alerts is fine; a failed pull is not)"),
+    Check("weather_alerts_unmapped_counties", "warn",
+          """SELECT COUNT(*) FROM core.weather_alert_counties ac
+             JOIN core.weather_alerts a ON a.alert_id = ac.alert_id AND a.hazard IN ('heat', 'cold')
+             LEFT JOIN core.county_fips f ON f.county_fips = ac.county_fips
+             WHERE f.county_fips IS NULL""",
+          lambda v: v == 0, "Heat/cold alert counties missing from core.county_fips (members there would be missed)"),
+
+    # --- vulnerability index ---
+    Check("vulnerability_index_covers_members", "error",
+          """SELECT (SELECT COUNT(*) FROM core.member_eligibility
+                     WHERE is_current AND (coverage_end IS NULL OR coverage_end >= CURRENT_DATE))
+                  - (SELECT COUNT(*) FROM analytics.v_member_vulnerability)""",
+          lambda v: v == 0, "Every active member has exactly one vulnerability score (no one silently dropped)"),
+    Check("wellness_queue_excludes_opt_outs", "error",
+          """SELECT COUNT(*) FROM care.v_wellness_check_queue q
+             JOIN core.contact_preferences c ON c.member_id = q.member_id AND c.channel IN ('phone', 'all')""",
+          lambda v: v == 0, "No member who opted out of phone contact is on the wellness-check call list"),
+    Check("analytics_exposes_no_identifiers", "error",
+          """SELECT COUNT(*) FROM svv_columns
+             WHERE table_schema = 'analytics'
+               AND column_name IN ('member_id', 'first_name', 'last_name', 'phone', 'dob', 'notes', 'address')""",
+          lambda v: v == 0, "analytics.* stays de-identified: no direct identifiers in any view"),
 ]
 
 

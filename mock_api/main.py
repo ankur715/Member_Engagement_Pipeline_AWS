@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import random
+import re
 from datetime import date, datetime, time, timedelta, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
@@ -319,3 +320,116 @@ def sheet_values(sheet_id: str, sheet_range: str):
 def health():
     # Unauthenticated liveness check (used to confirm the server is up).
     return {"status": "ok"}
+
+
+# ------------------------------------------------- NYC Open Data (HPD violations)
+# Same path and field names as the real Socrata dataset (wvxf-dwi5). Public
+# data in reality, so -- like the real API -- no bearer token is required.
+
+HPD_CODES = [
+    ("C", True,  "§ 27-2029 ADM CODE PROVIDE AN ADEQUATE SUPPLY OF HEAT FOR THE APARTMENT IN THE ENTIRE APARTMENT"),
+    ("C", True,  "§ 27-2031 ADMIN. CODE: PROVIDE HOT WATER AT ALL HOT WATER FIXTURES IN THE ENTIRE APARTMENT"),
+    ("C", False, "§ 27-2017.4 ADM CODE ABATE THE INFESTATION CONSISTING OF MICE IN THE ENTIRE APARTMENT"),
+    ("B", False, "§ 27-2017.3 HMC: TRACE AND CORRECT THE CONDITIONS CAUSING MOLD IN THE BATHROOM"),
+    ("B", False, "§ 27-2005 ADM CODE REPAIR THE BROKEN OR DEFECTIVE PLASTERED SURFACES IN THE KITCHEN"),
+    ("A", False, "§ 27-2046.1 HMC: REPAIR THE SMOKE DETECTOR IN THE HALLWAY"),
+]
+NYC_BOROS = {"Kings": "BROOKLYN", "Queens": "QUEENS", "Bronx": "BRONX"}
+
+
+def hpd_violations(today: date) -> list[dict]:
+    """Open violations for NYC ZIPs where members live. Some ZIPs are much
+    worse than others (deterministic per ZIP), with the usual export mess."""
+    rows = []
+    zips = sorted({(m["zip"], m["county"]) for m in member_roster() if m["county"] in NYC_BOROS})
+    for zip_code, county in zips:
+        rng = random.Random(_hash_int("hpd-" + zip_code))
+        for n in range(rng.choice([2, 5, 10, 25, 40])):            # bad buildings cluster by ZIP
+            cls, _heat, desc = rng.choices(HPD_CODES, weights=[3, 2, 2, 3, 3, 1])[0]
+            inspected = today - timedelta(days=rng.randint(5, 900))
+            zip_out = rng.choice([zip_code] * 8 + [f"{zip_code}-{rng.randint(1000, 9999)}", ""])
+            rows.append({
+                "violationid": str(10_000_000 + _hash_int(f"{zip_code}-{n}") % 9_000_000),
+                "zip": zip_out,                                     # ZIP+4 or blank sometimes
+                "boro": NYC_BOROS[county],
+                "class": cls.lower() if rng.random() < 0.05 else cls,
+                "inspectiondate": inspected.strftime("%Y-%m-%dT00:00:00.000"),   # Socrata floating timestamp
+                "novdescription": desc,
+                "violationstatus": "Open",
+                "currentstatus": rng.choice(["NOV SENT OUT", "FIRST NO ACCESS TO RE- INSPECT VIOLATION"]),
+            })
+    return sorted(rows, key=lambda r: r["violationid"])
+
+
+@app.get("/resource/wvxf-dwi5.json")
+def socrata_hpd(where: str | None = Query(default=None, alias="$where"),
+                limit: int = Query(default=1000, alias="$limit"),
+                offset: int = Query(default=0, alias="$offset")):
+    rows = hpd_violations(_now().date())
+    # Minimal SoQL support: honour "zip in ('11201', ...)" -- everything we return is Open.
+    m = re.search(r"zip\s+in\s*\(([^)]*)\)", where or "", re.I)
+    if m:
+        wanted = {z.strip().strip("'\"") for z in m.group(1).split(",")}
+        rows = [r for r in rows if r["zip"][:5] in wanted or r["zip"] == ""]
+    return rows[offset:offset + limit]                              # Socrata returns a bare JSON list
+
+
+# ----------------------------------------------- NOAA / NWS weather alerts
+# Same path and GeoJSON shape as api.weather.gov/alerts/active (public, no
+# token). Real NY alerts are seasonal, so for demos the scenario can be forced:
+#   MOCK_WEATHER_SCENARIO=heat | cold | none | auto (default: by month)
+
+NWS_SAME = {"Bronx": "036005", "Kings": "036047", "Queens": "036081", "Nassau": "036059", "Westchester": "036119"}
+
+
+def _scenario(now: datetime) -> str:
+    s = os.environ.get("MOCK_WEATHER_SCENARIO", "auto").lower()
+    if s != "auto":
+        return s
+    return "heat" if now.month in (6, 7, 8, 9) else ("cold" if now.month in (12, 1, 2, 3) else "none")
+
+
+def _nws_feature(alert_key: str, event: str, severity: str, counties: list[str], onset: datetime,
+                 ends: datetime | None, expires: datetime, message_type: str = "Alert") -> dict:
+    local = timezone(timedelta(hours=-4))                   # NWS sends local offsets, e.g. -04:00
+    iso = lambda d: d.astimezone(local).isoformat(timespec="seconds") if d else None  # noqa: E731
+    alert_id = f"urn:oid:2.49.0.1.840.0.{hashlib.sha1(alert_key.encode()).hexdigest()}.001.1"
+    return {"id": f"https://api.weather.gov/alerts/{alert_id}", "type": "Feature", "geometry": None,
+            "properties": {
+                "id": alert_id, "event": event, "severity": severity, "urgency": "Expected",
+                "certainty": "Likely", "status": "Actual", "messageType": message_type,
+                "onset": iso(onset), "effective": iso(onset), "ends": iso(ends), "expires": iso(expires),
+                "headline": f"{event} issued for {', '.join(counties)} County",
+                "areaDesc": "; ".join(counties),
+                "geocode": {"SAME": [NWS_SAME[c] for c in counties], "UGC": [f"NYZ0{70 + i}" for i, _ in enumerate(counties)]},
+            }}
+
+
+def nws_active_alerts(now: datetime) -> list[dict]:
+    day = now.date()
+    start = datetime.combine(day, time(10), tzinfo=timezone.utc)   # issued this morning
+    features = []
+    scenario = _scenario(now)
+    if scenario == "heat":
+        features.append(_nws_feature(f"heat-{day}", "Heat Advisory", "Moderate", ["Kings", "Bronx", "Queens"],
+                                     start - timedelta(hours=12), start + timedelta(hours=36), start + timedelta(hours=36)))
+        features.append(_nws_feature(f"xheat-{day}", "Extreme Heat Warning", "Severe", ["Bronx"],
+                                     start - timedelta(hours=6), None, start + timedelta(hours=30)))  # no "ends": use expires
+    elif scenario == "cold":
+        features.append(_nws_feature(f"cold-{day}", "Extreme Cold Warning", "Severe", ["Kings", "Bronx", "Nassau", "Westchester"],
+                                     start - timedelta(hours=12), start + timedelta(hours=30), start + timedelta(hours=30)))
+        features.append(_nws_feature(f"cwa-{day}", "Cold Weather Advisory", "Moderate", ["Queens"],
+                                     start - timedelta(hours=6), start + timedelta(hours=24), start + timedelta(hours=24)))
+    # Always-present noise the pipeline must ignore for the index: a marine alert.
+    noise = _nws_feature(f"marine-{day}", "Small Craft Advisory", "Minor", ["Kings"],
+                         start - timedelta(hours=3), start + timedelta(hours=12), start + timedelta(hours=12))
+    noise["properties"]["geocode"]["SAME"] = ["073335"]             # marine zone, not a county
+    features.append(noise)
+    return features
+
+
+@app.get("/alerts/active")
+def nws_alerts_active(area: str | None = None):
+    features = nws_active_alerts(_now()) if (area or "NY").upper() == "NY" else []
+    return {"@context": {}, "type": "FeatureCollection", "title": "Current watches, warnings, and advisories",
+            "updated": _now().isoformat(timespec="seconds"), "features": features}

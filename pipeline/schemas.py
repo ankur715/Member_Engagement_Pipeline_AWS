@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import pyarrow as pa
 
 TS = pa.timestamp("us")  # Redshift doesn't accept nanosecond Parquet timestamps
+MONEY = pa.decimal128(12, 2)  # DECIMAL(12,2) in Redshift -- exact cents, no float drift
 
 
 # frozen=True: specs are constants and can't be changed by accident at runtime.
@@ -124,6 +125,78 @@ NOTE_CLASSIFICATIONS = StagingSpec("note_classifications", (
     ("classified_at", TS),
 ))
 
+# Medical claims from health plans (one row per claim version in a file).
+CLAIMS = StagingSpec("claims", (
+    ("load_id", pa.string()),
+    ("claim_id", pa.string()),
+    ("member_id", pa.string()),
+    ("health_plan", pa.string()),
+    ("claim_type", pa.string()),
+    ("place_of_service", pa.string()),
+    ("revenue_code", pa.string()),
+    ("cpt_code", pa.string()),
+    ("primary_dx", pa.string()),
+    ("service_from", pa.date32()),
+    ("service_to", pa.date32()),
+    ("billed_amount", MONEY),
+    ("paid_amount", MONEY),
+    ("claim_status", pa.string()),
+    ("freq_code", pa.string()),
+    ("received_date", pa.date32()),
+    ("source_file", pa.string()),
+))
+
+# Health risk assessment survey responses (normalized answers).
+HRA_RESPONSES = StagingSpec("hra_responses", (
+    ("load_id", pa.string()),
+    ("response_id", pa.string()),
+    ("member_id", pa.string()),
+    ("submitted_at", TS),
+    ("updated_at", TS),
+    ("is_complete", pa.bool_()),
+    ("lives_alone", pa.bool_()),
+    ("mobility_level", pa.string()),
+    ("has_working_heat", pa.bool_()),
+    ("has_ac", pa.bool_()),
+    ("utility_cost_burden", pa.bool_()),
+    ("source_file", pa.string()),
+))
+
+# Open NYC HPD housing violations (public data) in member ZIPs.
+HOUSING_VIOLATIONS = StagingSpec("housing_violations", (
+    ("load_id", pa.string()),
+    ("violation_id", pa.string()),
+    ("zip", pa.string()),
+    ("boro", pa.string()),
+    ("violation_class", pa.string()),
+    ("is_heat_hot_water", pa.bool_()),
+    ("inspection_date", pa.date32()),
+    ("nov_description", pa.string()),
+))
+
+# NWS weather alerts (one row per alert) and the counties each alert covers.
+WEATHER_ALERTS = StagingSpec("weather_alerts", (
+    ("load_id", pa.string()),
+    ("alert_id", pa.string()),
+    ("event", pa.string()),
+    ("hazard", pa.string()),
+    ("severity", pa.string()),
+    ("urgency", pa.string()),
+    ("certainty", pa.string()),
+    ("message_type", pa.string()),
+    ("onset_at", TS),
+    ("ends_at", TS),
+    ("headline", pa.string()),
+    ("seen_at", TS),
+))
+
+WEATHER_ALERT_COUNTIES = StagingSpec("weather_alert_counties", (
+    ("load_id", pa.string()),
+    ("alert_id", pa.string()),
+    ("county_fips", pa.string()),
+))
+
 # Every contract, so tests can check each one against the staging DDL.
 ALL_SPECS = (MEMBER_ELIGIBILITY, ENGAGEMENTS, EVENTS, EVENT_ATTENDANCE, CONTACT_PREFERENCES,
-             MEMBER_SDOH_NEEDS, NOTE_CLASSIFICATIONS)
+             MEMBER_SDOH_NEEDS, NOTE_CLASSIFICATIONS, CLAIMS, HRA_RESPONSES, HOUSING_VIOLATIONS,
+             WEATHER_ALERTS, WEATHER_ALERT_COUNTIES)

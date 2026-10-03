@@ -24,7 +24,8 @@ def test_redact_removes_identifiers():
 
 
 def test_migrations_are_well_formed_and_ordered():
-    assert [v for v, _, _ in migrate.discover()] == list(range(1, 9))
+    versions = [v for v, _, _ in migrate.discover()]
+    assert versions == list(range(1, len(versions) + 1))  # contiguous, no gaps
 
 
 def test_editing_an_applied_migration_is_rejected():

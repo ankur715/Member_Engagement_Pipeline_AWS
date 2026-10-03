@@ -30,6 +30,14 @@ PHI_HASH_KEY = os.environ.get("PHI_HASH_KEY", "")
 MOCK_API_URL = os.environ.get("MOCK_API_URL", "http://localhost:9000")
 MOCK_API_TOKEN = os.environ.get("MOCK_API_TOKEN", "local-dev-token")
 
+# --- Public data APIs. Default to the mock (offline); set to the real hosts:
+#     NYC_OPEN_DATA_URL=https://data.cityofnewyork.us   NWS_API_URL=https://api.weather.gov
+NYC_OPEN_DATA_URL = os.environ.get("NYC_OPEN_DATA_URL", MOCK_API_URL)
+NYC_OPEN_DATA_APP_TOKEN = os.environ.get("NYC_OPEN_DATA_APP_TOKEN", "")  # optional; raises rate limits
+NWS_API_URL = os.environ.get("NWS_API_URL", MOCK_API_URL)
+# api.weather.gov requires a User-Agent identifying the app and a contact.
+NWS_USER_AGENT = os.environ.get("NWS_USER_AGENT", "member-engagement-pipeline (contact@example.com)")
+
 # --- Real Salesforce (optional). If SF_USERNAME is blank, the mock is used. ---
 SF_USERNAME = os.environ.get("SF_USERNAME", "")
 SF_PASSWORD = os.environ.get("SF_PASSWORD", "")
