@@ -173,6 +173,10 @@ CHECKS = [
           """SELECT COUNT(*) FROM care.v_wellness_check_queue q
              JOIN core.contact_preferences c ON c.member_id = q.member_id AND c.channel IN ('phone', 'all')""",
           lambda v: v == 0, "No member who opted out of phone contact is on the wellness-check call list"),
+    Check("llm_rules_agreement_pct", "warn",
+          """SELECT COALESCE(100.0 * SUM(both_methods) / NULLIF(SUM(both_methods + rules_only + llm_only), 0), 100)
+             FROM analytics.v_sdoh_method_agreement""",
+          lambda v: v >= 70, "LLM vs. rule-based SDoH tags agree on >= 70% of tags (drift monitor; 100 if not run)"),
     Check("analytics_exposes_no_identifiers", "error",
           """SELECT COUNT(*) FROM svv_columns
              WHERE table_schema = 'analytics'

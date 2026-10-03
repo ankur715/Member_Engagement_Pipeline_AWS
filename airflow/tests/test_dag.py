@@ -23,7 +23,7 @@ def test_dag_basics(dag):
 
 def test_redshift_writers_use_pool(dag):
     for task_id in ("apply_migrations", "load_member_files", "ingest_salesforce_activities",
-                    "ingest_events", "ingest_contact_preferences", "tag_sdoh_needs", "load_claims", "load_hra", "ingest_housing_violations", "ingest_weather_alerts"):
+                    "ingest_events", "ingest_contact_preferences", "tag_sdoh_needs", "load_claims", "load_hra", "ingest_housing_violations", "ingest_weather_alerts", "classify_notes_llm"):
         assert dag.get_task(task_id).pool == "redshift", task_id
 
 
@@ -33,10 +33,11 @@ def test_roster_loads_are_sequential(dag):
 
 def test_sdoh_tagging_follows_salesforce(dag):
     assert "ingest_salesforce_activities" in dag.get_task("tag_sdoh_needs").upstream_task_ids
+    assert "tag_sdoh_needs" in dag.get_task("classify_notes_llm").upstream_task_ids
 
 
 def test_dq_waits_for_every_source(dag):
-    assert {"load_member_files", "tag_sdoh_needs", "ingest_events", "ingest_contact_preferences", "load_claims", "load_hra", "ingest_housing_violations",
+    assert {"load_member_files", "classify_notes_llm", "ingest_events", "ingest_contact_preferences", "load_claims", "load_hra", "ingest_housing_violations",
          "ingest_weather_alerts"} \
         <= dag.get_task("data_quality").upstream_task_ids
 
