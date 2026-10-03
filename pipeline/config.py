@@ -38,6 +38,18 @@ NWS_API_URL = os.environ.get("NWS_API_URL", MOCK_API_URL)
 # api.weather.gov requires a User-Agent identifying the app and a contact.
 NWS_USER_AGENT = os.environ.get("NWS_USER_AGENT", "member-engagement-pipeline (contact@example.com)")
 
+# --- LLM utilities (Claude). Off by default so pipelines and tests never need a key.
+#     none      -> LLM steps skip cleanly
+#     anthropic -> Claude API (ANTHROPIC_API_KEY or an `ant auth login` profile)
+#     bedrock   -> Amazon Bedrock in AWS_REGION (AWS credentials; HIPAA-eligible under the AWS BAA)
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "none").strip().lower()
+LLM_MODEL = os.environ.get("LLM_MODEL", "claude-opus-5-5")
+LLM_EFFORT = os.environ.get("LLM_EFFORT", "low")           # short, well-specified tasks -> low effort
+LLM_MAX_NOTES_PER_RUN = int(os.environ.get("LLM_MAX_NOTES_PER_RUN", "100"))  # cost cap per DAG run
+# Everything in this project is synthetic. Set false with real data: then raw
+# notes may only go to a BAA-covered endpoint (Bedrock), never the direct API.
+SYNTHETIC_DATA = os.environ.get("SYNTHETIC_DATA", "true").strip().lower() in ("1", "true", "yes")
+
 # --- Real Salesforce (optional). If SF_USERNAME is blank, the mock is used. ---
 SF_USERNAME = os.environ.get("SF_USERNAME", "")
 SF_PASSWORD = os.environ.get("SF_PASSWORD", "")

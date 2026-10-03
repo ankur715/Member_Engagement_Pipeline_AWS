@@ -10,6 +10,7 @@ os.environ.update({
     "PHI_HASH_KEY": "unit-test-key",
     "REDSHIFT_IAM_ROLE_ARN": "arn:aws:iam::123456789012:role/test-copy",
     "MOCK_API_TOKEN": "local-dev-token",
+    "LLM_PROVIDER": "none",          # tests never call a real model; they inject a fake client
 })
 os.environ.pop("AWS_PROFILE", None)
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
