@@ -90,3 +90,19 @@ def test_every_analytics_view_is_documented():
     sql = "\n".join(p.read_text() for p in sorted((Path(__file__).parents[1] / "sql" / "redshift").glob("V*.sql")))
     views = {f"analytics.{v}" for v in re.findall(r"CREATE OR REPLACE VIEW analytics\.(\w+)", sql)}
     assert views == set(ask.VIEW_DOCS)
+
+
+def test_schema_context_includes_exact_categorical_values(monkeypatch):
+    class Cur:
+        def execute(self, *a): pass
+        def fetchall(self): return [("v_member_vulnerability", "vulnerability_tier", "character varying")]
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    class Conn:
+        def cursor(self): return Cur()
+        def close(self): pass
+    monkeypatch.setattr(ask, "get_connection", lambda: Conn())
+    ctx = ask.schema_context()
+    assert "analytics.v_member_vulnerability" in ctx
+    assert "vulnerability_tier: high, medium, low" in ctx          # model sees the real casing

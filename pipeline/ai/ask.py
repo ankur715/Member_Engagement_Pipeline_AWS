@@ -45,6 +45,22 @@ VIEW_DOCS = {
     "analytics.v_sdoh_method_agreement": "per need category: rules vs LLM tag agreement counts",
 }
 
+# Exact values of categorical columns. Without these the model guesses
+# ('High' vs 'high') and a correct-looking query silently returns nothing.
+VALUE_HINTS = {
+    "vulnerability_tier": ["high", "medium", "low"],
+    "active_hazard": ["heat", "cold", "NULL when no alert"],
+    "hazard": ["heat", "cold"],
+    "need_category": ["food_insecurity", "transportation", "social_isolation", "housing_instability",
+                      "medication_affordability", "opt_out_request"],
+    "method": ["rules", "llm"],
+    "status": ["Open", "Completed", "No Answer (CHW activities)", "scheduled/completed/cancelled (events)"],
+    "mobility_level": ["none", "some", "severe"],
+    "age_band": ["under_65", "65-74", "75-84", "85_plus"],
+    "county": ["Bronx", "Kings", "Queens", "Nassau", "Westchester"],
+    "gender": ["F", "M"],
+}
+
 FORBIDDEN_KEYWORDS = re.compile(
     r"\b(insert|update|delete|merge|create|drop|alter|grant|revoke|truncate|copy|unload|call|vacuum|"
     r"analyze|set|reset|begin|commit|rollback|execute|lock|cancel|prepare|deallocate)\b", re.I)
@@ -64,7 +80,8 @@ class SqlAnswer(BaseModel):
 
 SYSTEM_PROMPT = """You write SQL for analysts of a community-health program's Amazon Redshift \
 warehouse. Answer each question with ONE SELECT statement that reads only the analytics views \
-listed below, always schema-qualified (analytics.<view>). Use only columns that are listed. \
+listed below, always schema-qualified (analytics.<view>). Use only columns that are listed, \
+and when filtering a categorical column use its exact listed value (values are case-sensitive). \
 The views are de-identified: there are no names, phone numbers or member ids, so if a question \
 asks for identities or for data the views don't contain, set answerable to false and leave sql \
 empty. Prefer simple, readable SQL with clear column aliases, and order results sensibly."""
@@ -112,7 +129,9 @@ def schema_context() -> str:
     views: dict[str, list[str]] = {}
     for table, column, dtype in rows:
         views.setdefault(f"analytics.{table}", []).append(f"{column} {dtype}")
-    return "\n".join(f"{v} -- {VIEW_DOCS.get(v, '')}\n  columns: {', '.join(cols)}" for v, cols in views.items())
+    catalog = "\n".join(f"{v} -- {VIEW_DOCS.get(v, '')}\n  columns: {', '.join(cols)}" for v, cols in views.items())
+    hints = "\n".join(f"  {col}: {', '.join(vals)}" for col, vals in VALUE_HINTS.items())
+    return f"{catalog}\n\nExact values of categorical columns (case-sensitive):\n{hints}"
 
 
 def run(sql: str, row_cap: int = ROW_CAP) -> tuple[list[str], list[tuple]]:
