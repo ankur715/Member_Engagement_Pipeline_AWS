@@ -43,8 +43,11 @@ NWS_USER_AGENT = os.environ.get("NWS_USER_AGENT", "member-engagement-pipeline (c
 #     anthropic -> Claude API (ANTHROPIC_API_KEY or an `ant auth login` profile)
 #     bedrock   -> Amazon Bedrock in AWS_REGION (AWS credentials; HIPAA-eligible under the AWS BAA)
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "none").strip().lower()
-LLM_MODEL = os.environ.get("LLM_MODEL", "claude-opus-5-5")
-LLM_EFFORT = os.environ.get("LLM_EFFORT", "low")           # short, well-specified tasks -> low effort
+LLM_MODEL = os.environ.get("LLM_MODEL", "claude-opus-5-5")    # or a full Bedrock id/profile, e.g. us.anthropic.claude-haiku-4-5-20251001-v1:0
+# Bedrock endpoint: "mantle" (Messages API endpoint, newest models) or "runtime"
+# (bedrock-runtime InvokeModel; needed for models served only via inference profiles).
+LLM_BEDROCK_ENDPOINT = os.environ.get("LLM_BEDROCK_ENDPOINT", "mantle").strip().lower()
+LLM_EFFORT = os.environ.get("LLM_EFFORT", "low")           # short, well-specified tasks -> low effort ("" = don't send)
 LLM_MAX_NOTES_PER_RUN = int(os.environ.get("LLM_MAX_NOTES_PER_RUN", "100"))  # cost cap per DAG run
 # Everything in this project is synthetic. Set false with real data: then raw
 # notes may only go to a BAA-covered endpoint (Bedrock), never the direct API.

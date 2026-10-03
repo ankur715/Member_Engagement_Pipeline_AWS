@@ -68,3 +68,37 @@ def test_api_errors_become_llm_unavailable(use_fake):
     use_fake("anthropic", boom)
     with pytest.raises(llm.LLMUnavailable):
         llm.parse("s", "u", Answer)
+
+
+def test_full_bedrock_ids_are_used_verbatim(use_fake, monkeypatch):
+    monkeypatch.setattr(config, "LLM_MODEL", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+    fake = use_fake("bedrock", lambda kind, kw: parsed_response(Answer(value="ok")))
+    llm.parse("s", "u", Answer)
+    _, kw = fake.messages.calls[0]
+    assert kw["model"] == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    assert "output_config" not in kw                      # Haiku 4.5 doesn't take effort
+
+
+@pytest.mark.parametrize("model,tag", [
+    ("claude-opus-5-5", "claude-opus-5-5"),
+    ("us.anthropic.claude-haiku-4-5-20251001-v1:0", "claude-haiku-4-5"),
+    ("global.anthropic.claude-sonnet-5-5", "claude-sonnet-5-5"),
+    ("anthropic.claude-opus-5-5", "claude-opus-5-5"),
+])
+def test_model_tag(monkeypatch, model, tag):
+    monkeypatch.setattr(config, "LLM_MODEL", model)
+    assert llm.model_tag() == tag
+
+
+def test_bedrock_endpoint_selects_client(monkeypatch):
+    import anthropic
+    monkeypatch.setattr(config, "LLM_PROVIDER", "bedrock")
+    made = {}
+    monkeypatch.setattr(anthropic, "AnthropicBedrock", lambda **kw: made.setdefault("runtime", kw))
+    monkeypatch.setattr(anthropic, "AnthropicBedrockMantle", lambda **kw: made.setdefault("mantle", kw))
+    for endpoint in ("runtime", "mantle"):
+        monkeypatch.setattr(config, "LLM_BEDROCK_ENDPOINT", endpoint)
+        llm.client.cache_clear()
+        llm.client()
+    llm.client.cache_clear()
+    assert made == {"runtime": {"aws_region": "us-east-1"}, "mantle": {"aws_region": "us-east-1"}}

@@ -14,6 +14,7 @@
 - Errors: API/network failures raise LLMUnavailable; every caller treats the
   LLM as optional and degrades to its non-LLM behavior.
 """
+import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import TypeVar
@@ -60,10 +61,25 @@ def enabled() -> bool:
 
 
 def model_id() -> str:
-    # Bedrock model ids carry an "anthropic." prefix; the Claude API uses the bare id.
-    if config.LLM_PROVIDER == "bedrock" and not config.LLM_MODEL.startswith("anthropic."):
+    # A value with a dot is already a full Bedrock model id or inference profile
+    # (anthropic.claude-..., us.anthropic.claude-...): use it verbatim. Otherwise
+    # Bedrock needs the "anthropic." prefix; the Claude API uses the bare id.
+    if config.LLM_PROVIDER == "bedrock" and "." not in config.LLM_MODEL:
         return f"anthropic.{config.LLM_MODEL}"
     return config.LLM_MODEL
+
+
+def model_tag() -> str:
+    """Short, stable model name for labels: us.anthropic.claude-haiku-4-5-20251001-v1:0 -> claude-haiku-4-5."""
+    tag = re.sub(r"^(us|eu|apac|global)\.", "", config.LLM_MODEL)
+    tag = re.sub(r"^anthropic\.", "", tag)
+    tag = re.sub(r"-v\d+(:\d+)?$", "", tag)
+    return re.sub(r"-\d{8}$", "", tag)
+
+
+def _supports_effort() -> bool:
+    # The effort setting works on current models; Claude Haiku 4.5 rejects it.
+    return bool(config.LLM_EFFORT) and "haiku-4-5" not in config.LLM_MODEL
 
 
 @lru_cache(maxsize=1)
@@ -72,16 +88,21 @@ def client():
     import anthropic  # imported lazily: the pipeline runs fine without an LLM configured
     if config.LLM_PROVIDER == "anthropic":
         return anthropic.Anthropic()        # ANTHROPIC_API_KEY or an `ant auth login` profile
+    if config.LLM_PROVIDER == "bedrock" and config.LLM_BEDROCK_ENDPOINT == "runtime":
+        return anthropic.AnthropicBedrock(aws_region=config.AWS_REGION)   # bedrock-runtime InvokeModel
     if config.LLM_PROVIDER == "bedrock":
         return anthropic.AnthropicBedrockMantle(aws_region=config.AWS_REGION)
     raise LLMUnavailable(f"LLM_PROVIDER={config.LLM_PROVIDER!r}: LLM steps are disabled")
 
 
 def _provider_kwargs() -> dict:
+    kwargs = {}
+    if _supports_effort():
+        kwargs["output_config"] = {"effort": config.LLM_EFFORT}
     # Server-side refusal fallback is a Claude API feature; Bedrock rejects the parameter.
     if config.LLM_PROVIDER == "anthropic":
-        return {"betas": [FALLBACK_BETA], "fallbacks": "default"}
-    return {}
+        kwargs.update(betas=[FALLBACK_BETA], fallbacks="default")
+    return kwargs
 
 
 def _refused(response) -> tuple[bool, dict]:
@@ -105,7 +126,6 @@ def parse(system: str, user: str, schema: type[T], usage: Usage | None = None,
             system=system,
             messages=[{"role": "user", "content": user}],
             output_format=schema,
-            output_config={"effort": config.LLM_EFFORT},
             **_provider_kwargs(),
         )
     except anthropic.APIError as exc:          # 4xx/5xx after SDK retries, or network failure
@@ -131,7 +151,6 @@ def text(system: str, user: str, usage: Usage | None = None, max_tokens: int = 2
             max_tokens=max_tokens,
             system=system,
             messages=[{"role": "user", "content": user}],
-            output_config={"effort": config.LLM_EFFORT},
             **_provider_kwargs(),
         )
     except anthropic.APIError as exc:

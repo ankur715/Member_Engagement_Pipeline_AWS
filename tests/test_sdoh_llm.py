@@ -48,6 +48,14 @@ def test_rule_version_fits_column():
     assert len(sdoh_llm.rule_version()) <= 20 and sdoh_llm.rule_version().startswith(sdoh_llm.PROMPT_VERSION)
 
 
+def test_switching_models_changes_rule_version(monkeypatch):
+    # Different models must get different labels, so switching re-tags every note.
+    monkeypatch.setattr(config, "LLM_MODEL", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+    haiku = sdoh_llm.rule_version()
+    monkeypatch.setattr(config, "LLM_MODEL", "us.anthropic.claude-opus-5-5")
+    assert haiku == "p1:claude-haiku-4-5" and sdoh_llm.rule_version() == "p1:claude-opus-5-5"
+
+
 def test_prompt_redacts_identifiers():
     prompt = sdoh_llm.build_prompt(_rows(1))
     assert "MEM10042" not in prompt and "555-0142" not in prompt

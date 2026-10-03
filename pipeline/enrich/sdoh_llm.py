@@ -64,8 +64,9 @@ and unanswered calls get an empty list. Return exactly one result per note, usin
 
 
 def rule_version() -> str:
-    # Stored in note_classifications.rule_version (VARCHAR 20): prompt + model.
-    return f"{PROMPT_VERSION}:{config.LLM_MODEL}"[:20]
+    # Stored in note_classifications.rule_version (VARCHAR 20): prompt + short
+    # model name, so a prompt OR model change re-tags every note.
+    return f"{PROMPT_VERSION}:{llm.model_tag()}"[:20]
 
 
 def notes_to_classify(limit: int) -> list[tuple]:
