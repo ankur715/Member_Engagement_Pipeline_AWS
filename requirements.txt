@@ -7,6 +7,7 @@ python-dotenv>=1.0
 requests>=2.32
 faker>=30
 pydantic>=2.8
+anthropic[bedrock]>=1.8   # Claude API + Amazon Bedrock clients (LLM utilities)
 simple-salesforce>=1.12
 gspread>=6.1
 

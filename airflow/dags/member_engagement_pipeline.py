@@ -148,6 +148,12 @@ def member_engagement_pipeline():
         from pipeline.ingest import weather_alerts
         return weather_alerts.main(ds)
 
+    @task(pool=REDSHIFT_POOL)
+    def classify_notes_llm(ds: str = None):
+        # Optional LLM tagging of CHW notes (method='llm'); skips if LLM_PROVIDER=none.
+        from pipeline.enrich import sdoh_llm
+        return sdoh_llm.main(ds)
+
     @task(retries=0)  # a DQ failure is a data problem; retrying won't fix it
     def data_quality(ds: str = None):
         from pipeline.quality import data_quality as dq
@@ -170,6 +176,7 @@ def member_engagement_pipeline():
     events = ingest_events()
     dnc = ingest_contact_preferences()
     sdoh = tag_sdoh_needs()
+    sdoh_llm = classify_notes_llm()
     claims = load_claims()
     hra = load_hra()
     housing = ingest_housing_violations()
@@ -179,12 +186,12 @@ def member_engagement_pipeline():
     # --- Wire the dependencies (">>" = "runs before") ---
     migrations >> drop_member_files() >> members          # schema first, then file drop, then load
     migrations >> [activities, events, dnc]               # the three API sources run in parallel
-    activities >> sdoh                                    # tag notes only after they've landed
+    activities >> sdoh >> sdoh_llm                        # rules first, then the optional LLM tagger
     migrations >> drop_claims_files() >> claims           # claims extracts, then load
     migrations >> drop_hra_file() >> hra                  # HRA survey export, then load
     members >> housing                                    # needs current member ZIPs
     migrations >> weather                                 # public NWS alerts
-    [members, sdoh, events, dnc, claims, hra, housing, weather] >> dq >> publish_plan_kpis()  # KPIs go out only if DQ passes
+    [members, sdoh_llm, events, dnc, claims, hra, housing, weather] >> dq >> publish_plan_kpis()  # KPIs go out only if DQ passes
 
 
 # Calling the decorated function registers the DAG with Airflow.

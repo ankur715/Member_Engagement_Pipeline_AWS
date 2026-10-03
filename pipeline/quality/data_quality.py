@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Callable
 
+from pipeline.ai import llm
 from pipeline.redshift import get_connection
 from pipeline.reference_data import HEALTH_PLANS
 
@@ -173,6 +174,10 @@ CHECKS = [
           """SELECT COUNT(*) FROM care.v_wellness_check_queue q
              JOIN core.contact_preferences c ON c.member_id = q.member_id AND c.channel IN ('phone', 'all')""",
           lambda v: v == 0, "No member who opted out of phone contact is on the wellness-check call list"),
+    Check("llm_rules_agreement_pct", "warn",
+          """SELECT COALESCE(100.0 * SUM(both_methods) / NULLIF(SUM(both_methods + rules_only + llm_only), 0), 100)
+             FROM analytics.v_sdoh_method_agreement""",
+          lambda v: v >= 70, "LLM vs. rule-based SDoH tags agree on >= 70% of tags (drift monitor; 100 if not run)"),
     Check("analytics_exposes_no_identifiers", "error",
           """SELECT COUNT(*) FROM svv_columns
              WHERE table_schema = 'analytics'
@@ -187,6 +192,52 @@ def evaluate(check: Check, value: float) -> dict:
             "observed_value": value, "description": check.description}
 
 
+EXPLAIN_SYSTEM_PROMPT = """You are the on-call data engineer for a healthcare member-engagement \
+pipeline (health-plan rosters, Salesforce CHW activity, events, a do-not-contact sheet, claims, \
+HRA surveys, NYC housing data, NOAA weather alerts) loading into Redshift. Given failed data \
+quality checks with their recent history and today's load audit, write a short triage note: \
+for each failure, the most likely cause and the first thing to check. Plain text only (it goes \
+into an email): no Markdown, no bold or headings; at most 5 short bullets starting with "- ", \
+under 120 words. Say when the data doesn't support a conclusion; don't invent \
+details that aren't in the input."""
+
+
+def explain_failures(batch_date: str, failed: list[dict], history: dict[str, list],
+                     audit: list[dict]) -> str | None:
+    """Ask the LLM for a short triage note. Aggregates only (check names, numbers,
+    load counts) -- never member rows. Returns None if the LLM is off or fails."""
+    if not failed or not llm.enabled():
+        return None
+    lines = [f"Batch date: {batch_date}", "", "Failed checks:"]
+    for r in failed:
+        trend = ", ".join(f"{d}: {v}" for d, v in history.get(r["check_name"], []))
+        lines.append(f"- {r['check_name']} [{r['severity']}] observed={r['observed_value']} "
+                     f"({r['description']}); previous days: {trend or 'no history'}")
+    lines += ["", "Today's loads (entity, status, rows in, rows staged, rows rejected):"]
+    lines += [f"- {a['entity']}, {a['status']}, {a['rows_in']}, {a['rows_staged']}, {a['rows_rejected']}"
+              for a in audit] or ["- none recorded"]
+    try:
+        return llm.text(EXPLAIN_SYSTEM_PROMPT, "\n".join(lines), max_tokens=1500).text
+    except llm.LLMUnavailable as exc:
+        print(f"LLM explanation skipped: {exc}")
+        return None
+
+
+def _context(cur, batch_date: str, failed: list[dict]) -> tuple[dict, list]:
+    """Recent values of the failed checks + today's load audit (aggregates only)."""
+    history = {}
+    for r in failed:
+        cur.execute("""SELECT batch_date, observed_value FROM ops.dq_results
+                       WHERE check_name = %s AND batch_date < %s
+                       ORDER BY batch_date DESC LIMIT 7;""", (r["check_name"], batch_date))
+        history[r["check_name"]] = [(str(d), v) for d, v in cur.fetchall()]
+    cur.execute("""SELECT entity, status, rows_in, rows_staged, rows_rejected FROM ops.load_audit
+                   WHERE RIGHT(load_id, 10) = %s OR started_at::DATE = %s::DATE
+                   ORDER BY started_at;""", (batch_date, batch_date))
+    audit = [dict(zip(("entity", "status", "rows_in", "rows_staged", "rows_rejected"), row)) for row in cur.fetchall()]
+    return history, audit
+
+
 def run_checks(batch_date: str) -> list[dict]:
     conn = get_connection()
     try:
@@ -198,29 +249,38 @@ def run_checks(batch_date: str) -> list[dict]:
                 value = cur.fetchone()[0]
                 # NULL (e.g. no rows to average) counts as 0.
                 results.append(evaluate(check, float(value) if value is not None else 0.0))
-            # 2. Save ALL results (passes too) for this date -- replacing any from a rerun.
+            # 2. Optional LLM triage note for whatever failed (errors and warnings).
+            failed = [r for r in results if not r["passed"]]
+            explanation = explain_failures(batch_date, failed, *_context(cur, batch_date, failed)) if failed and llm.enabled() else None
+
+            # 3. Save ALL results (passes too) for this date -- replacing any from a rerun.
             cur.execute("DELETE FROM ops.dq_results WHERE batch_date = %s;", (batch_date,))
             for r in results:
                 cur.execute(
-                    """INSERT INTO ops.dq_results (batch_date, check_name, severity, passed, observed_value, details)
-                       VALUES (%s, %s, %s, %s, %s, %s);""",
-                    (batch_date, r["check_name"], r["severity"], r["passed"], str(r["observed_value"]), r["description"]),
+                    """INSERT INTO ops.dq_results (batch_date, check_name, severity, passed, observed_value, details, explanation)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s);""",
+                    (batch_date, r["check_name"], r["severity"], r["passed"], str(r["observed_value"]), r["description"],
+                     explanation if not r["passed"] else None),
                 )
         conn.commit()
     finally:
         conn.close()
 
-    # 3. Print a readable summary to the task log.
+    # 4. Print a readable summary to the task log.
     for r in results:
         print(f"[{'PASS' if r['passed'] else r['severity'].upper()}] {r['check_name']} = {r['observed_value']}")
 
-    # 4. Only failed ERROR-level checks stop the pipeline; warnings are just recorded.
+    # 5. Only failed ERROR-level checks stop the pipeline; warnings are just recorded.
+    if explanation:
+        print("\nTriage note (LLM-generated):\n" + explanation)
+
     errors = [r for r in results if not r["passed"] and r["severity"] == "error"]
     if errors:
-        raise DataQualityError(
-            f"Batch {batch_date} failed {len(errors)} data quality check(s): "
-            + "; ".join(f"{r['check_name']}={r['observed_value']} ({r['description']})" for r in errors)
-        )
+        message = (f"Batch {batch_date} failed {len(errors)} data quality check(s): "
+                   + "; ".join(f"{r['check_name']}={r['observed_value']} ({r['description']})" for r in errors))
+        if explanation:
+            message += "\n\nTriage note (LLM-generated, verify before acting):\n" + explanation
+        raise DataQualityError(message)  # the message is what the alert email shows
     return results
 
 
