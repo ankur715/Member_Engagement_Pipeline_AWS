@@ -28,15 +28,18 @@ from pipeline.loaders import load_id_for, stage_and_merge
 from pipeline.redshift import fetch_all
 from pipeline.schemas import MEMBER_SDOH_NEEDS, NOTE_CLASSIFICATIONS
 
-METHOD = "llm"
+METHOD = "llm"             # stored in the `method` column; the rule-based tagger writes "rules"
 PROMPT_VERSION = "p1"      # bump when SYSTEM_PROMPT changes -> every note is re-tagged
-BATCH_SIZE = 20
+BATCH_SIZE = 20            # notes per request: fewer calls, but small enough to stay accurate
 
+# The only answers the model is allowed to give (enforced by structured output).
 Category = Literal["food_insecurity", "transportation", "social_isolation",
                    "housing_instability", "medication_affordability", "opt_out_request"]
+# Fails at import time if someone adds a category to one tagger but not the other.
 assert set(Category.__args__) == set(sdoh_rules.RULES), "LLM and rule categories must match"
 
 
+# Response shape: one NoteNeeds per note, wrapped in a NoteBatch.
 class NoteNeeds(BaseModel):
     note_id: str = Field(description="The id attribute of the note, copied exactly")
     needs: list[Category] = Field(description="Needs this note shows for the member; empty if none")
@@ -71,6 +74,8 @@ def rule_version() -> str:
 
 def notes_to_classify(limit: int) -> list[tuple]:
     """Newest notes not yet tagged by this method/prompt, or edited since."""
+    # A note needs (re)tagging if it was never tagged by the LLM, was edited
+    # after it was tagged, or was tagged with an older prompt/model.
     return fetch_all(
         """
         SELECT e.activity_id, e.member_id, e.notes, e.last_modified_at
@@ -90,6 +95,7 @@ def notes_to_classify(limit: int) -> list[tuple]:
 
 def build_prompt(batch: list[tuple]) -> str:
     # Notes are redacted (member ids, phones, dates, emails) before leaving the warehouse.
+    # Each note is wrapped in a tag with its id, so the answer can be matched back.
     parts = [f'<note id="{activity_id}">{phi.redact(note)}</note>' for activity_id, _m, note, _t in batch]
     return "Tag these notes:\n" + "\n".join(parts)
 
@@ -98,13 +104,14 @@ def classify_batch(batch: list[tuple], usage: llm.Usage) -> dict[str, list[str]]
     """{activity_id: [needs]} for one batch; None if the batch was refused."""
     result = llm.parse(SYSTEM_PROMPT, build_prompt(batch), NoteBatch, usage=usage, max_tokens=4000)
     if result.parsed is None:
-        return None
+        return None                        # refused
     wanted = {row[0] for row in batch}
     # Keep only ids we actually sent; a note the model skipped stays unclassified (retried next run).
     return {r.note_id: sorted(set(r.needs)) for r in result.parsed.results if r.note_id in wanted}
 
 
 def classify(rows: list[tuple], usage: llm.Usage) -> dict[str, list[str]]:
+    # Send the notes in batches of BATCH_SIZE and collect all the answers.
     tagged: dict[str, list[str]] = {}
     for i in range(0, len(rows), BATCH_SIZE):
         out = classify_batch(rows[i:i + BATCH_SIZE], usage)
@@ -117,10 +124,10 @@ def classify(rows: list[tuple], usage: llm.Usage) -> dict[str, list[str]]:
 def build_frames(rows: list[tuple], tagged: dict[str, list[str]], now: datetime):
     # Same shape as the rule-based tagger, with method='llm'.
     import pandas as pd
-    needs, classified = [], []
+    needs, classified = [], []         # needs: one row per need found; classified: one row per note
     for activity_id, member_id, _note, modified_at in rows:
         if activity_id not in tagged:
-            continue
+            continue                   # refused or skipped by the model: retried next run
         found = tagged[activity_id]
         needs += [{"activity_id": activity_id, "member_id": member_id, "need_category": c,
                    "method": METHOD, "detected_at": now} for c in found]
@@ -132,6 +139,7 @@ def build_frames(rows: list[tuple], tagged: dict[str, list[str]], now: datetime)
 
 def main(batch_date: str | None = None) -> dict:
     batch_date = batch_date or date.today().isoformat()
+    # 1. Guards: LLM switched off, or real PHI headed for a non-BAA endpoint.
     if not llm.enabled():
         print("LLM_PROVIDER is none -- skipping LLM note tagging.")
         return {"skipped": True}
@@ -140,10 +148,12 @@ def main(batch_date: str | None = None) -> dict:
         print("SYNTHETIC_DATA=false: refusing to send notes to the direct Claude API; use LLM_PROVIDER=bedrock.")
         return {"skipped": True, "reason": "phi_guardrail"}
 
+    # 2. Pick the notes to send (capped per run to control cost).
     rows = notes_to_classify(config.LLM_MAX_NOTES_PER_RUN)
     if not rows:
         print("No new or changed notes for the LLM tagger.")
         return {"notes": 0}
+    # 3. Ask Claude, tracking token usage.
     usage = llm.Usage()
     try:
         tagged = classify(rows, usage)
@@ -152,11 +162,13 @@ def main(batch_date: str | None = None) -> dict:
         print(f"LLM unavailable, skipping this run: {exc}")
         return {"skipped": True, "reason": "llm_unavailable"}
 
+    # 4. Load through the same path as every other source: Parquet -> COPY -> MERGE, one transaction.
     needs, classified = build_frames(rows, tagged, datetime.now(timezone.utc))
     if len(classified):
         stage_and_merge(load_id_for(f"sdoh_{METHOD}", batch_date), f"sdoh_{METHOD}",
                         [(MEMBER_SDOH_NEEDS, needs), (NOTE_CLASSIFICATIONS, classified)],
-                        "core.sp_merge_note_classifications", source_uri=f"llm:{llm.model_id()}",
+                        "core.sp_merge_note_classifications",
+                        source_uri=f"llm:{llm.model_id()}",       # lineage: which model produced the tags
                         rows_in=len(rows), rows_rejected=len(rows) - len(classified))
     summary = {"notes_sent": len(rows), "notes_tagged": len(classified), "needs_found": len(needs),
                "requests": usage.requests, "input_tokens": usage.input_tokens,

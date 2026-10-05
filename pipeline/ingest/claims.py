@@ -20,15 +20,16 @@ from pipeline.loaders import load_id_for, stage_and_merge
 from pipeline.reference_data import HEALTH_PLANS
 from pipeline.schemas import CLAIMS as SPEC
 
-PREFIX = "raw/claims"
-PLAN_NAMES = {key: name for key, name, _ in HEALTH_PLANS}
+PREFIX = "raw/claims"                                         # where health plans' claims files land
+PLAN_NAMES = {key: name for key, name, _ in HEALTH_PLANS}     # "evergreen" -> "Evergreen Health Plan"
+# Claim frequency code (from the UB-04/837 standard): 1 original, 7 replacement, 8 void.
 STATUS_BY_FREQ = {"1": "paid", "7": "adjusted", "8": "void"}
-CLAIM_TYPES = {"P": "professional", "I": "institutional"}
+CLAIM_TYPES = {"P": "professional", "I": "institutional"}     # doctor/office vs hospital/facility
 
 
 def _to_money(s: pd.Series) -> pd.Series:
     # "(12.50)" -> -12.50 ; "$1,234.50" -> 1234.50 ; "" -> NaN
-    neg = s.str.startswith("(") & s.str.endswith(")")
+    neg = s.str.startswith("(") & s.str.endswith(")")       # accounting style: (x) means negative
     num = pd.to_numeric(s.str.replace(r"[$,()\s]", "", regex=True), errors="coerce")
     return num.where(~neg, -num)
 
@@ -48,6 +49,7 @@ def _dot_icd10(code):
 
 def normalize(raw: pd.DataFrame, plan_key: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return (clean, rejects). Pure pandas -- unit tested without AWS."""
+    # Everything as trimmed text first; blank cells become NA (missing).
     df = raw.astype("string").apply(lambda s: s.str.strip()).replace({"": pd.NA})
 
     out = pd.DataFrame({
@@ -55,7 +57,7 @@ def normalize(raw: pd.DataFrame, plan_key: str) -> tuple[pd.DataFrame, pd.DataFr
         "member_id": df["MEMBER_ID"].str.upper(),
         "health_plan": PLAN_NAMES[plan_key],
         "claim_type": df["CLAIM_TYPE"].str.upper().map(CLAIM_TYPES),
-        "place_of_service": df["POS"].str.zfill(2),
+        "place_of_service": df["POS"].str.zfill(2),           # "9" -> "09" (POS codes are 2 digits)
         # Excel-mangled revenue codes: numeric and short -> zero-pad back to 4.
         "revenue_code": df["REV_CD"].where(df["REV_CD"].isna(), df["REV_CD"].str.zfill(4)),
         "cpt_code": df["CPT"],
@@ -64,7 +66,7 @@ def normalize(raw: pd.DataFrame, plan_key: str) -> tuple[pd.DataFrame, pd.DataFr
         "service_to": _to_date(df["THRU_DT"]),
         "billed_amount": _to_money(df["BILLED_AMT"]),
         "paid_amount": _to_money(df["PAID_AMT"]),
-        "freq_code": df["FREQ_CD"].fillna("1"),
+        "freq_code": df["FREQ_CD"].fillna("1"),               # missing -> original claim
         "received_date": _to_date(df["RECEIVED_DT"]),
     }, index=df.index)
     out["claim_status"] = out["freq_code"].map(STATUS_BY_FREQ).fillna("paid")
@@ -85,6 +87,8 @@ def normalize(raw: pd.DataFrame, plan_key: str) -> tuple[pd.DataFrame, pd.DataFr
 def load_file(key: str, batch_date: str) -> dict:
     # "raw/claims/dt=.../claims_evergreen_20260930.csv" -> "evergreen"
     plan_key = key.rsplit("/", 1)[-1].split("_")[1]
+    # dtype=str + keep_default_na=False: read every cell as-is, so pandas can't
+    # strip leading zeros from codes or turn "NA" text into missing values.
     raw = pd.read_csv(io.BytesIO(s3_io.get_bytes(key)), dtype=str, keep_default_na=False)
     clean, rejects = normalize(raw, plan_key)
 

@@ -23,8 +23,10 @@ from pydantic import BaseModel
 
 from pipeline import config
 
+# T = "some Pydantic model class": lets parse() promise it returns that same type.
 T = TypeVar("T", bound=BaseModel)
 
+# Beta flag that turns on server-side fallbacks (Claude API only, not Bedrock).
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 
@@ -41,8 +43,9 @@ class Usage:
     refusals: int = 0
 
     def add(self, response) -> None:
+        # Called once per API response; every response reports its own token counts.
         self.requests += 1
-        u = getattr(response, "usage", None)
+        u = getattr(response, "usage", None)  # getattr: test fakes may not have .usage
         if u is not None:
             self.input_tokens += getattr(u, "input_tokens", 0) or 0
             self.output_tokens += getattr(u, "output_tokens", 0) or 0
@@ -52,11 +55,12 @@ class Usage:
 class Result:
     parsed: object | None          # the validated Pydantic object (None on refusal)
     text: str | None = None        # plain-text answer (text() calls)
-    refused: bool = False
-    stop_details: dict = field(default_factory=dict)
+    refused: bool = False          # True when the model declined the request
+    stop_details: dict = field(default_factory=dict)   # why it declined (category/explanation)
 
 
 def enabled() -> bool:
+    # Every LLM step checks this first and skips when the provider is "none".
     return config.LLM_PROVIDER in ("anthropic", "bedrock")
 
 
@@ -71,10 +75,10 @@ def model_id() -> str:
 
 def model_tag() -> str:
     """Short, stable model name for labels: us.anthropic.claude-haiku-4-5-20251001-v1:0 -> claude-haiku-4-5."""
-    tag = re.sub(r"^(us|eu|apac|global)\.", "", config.LLM_MODEL)
-    tag = re.sub(r"^anthropic\.", "", tag)
-    tag = re.sub(r"-v\d+(:\d+)?$", "", tag)
-    return re.sub(r"-\d{8}$", "", tag)
+    tag = re.sub(r"^(us|eu|apac|global)\.", "", config.LLM_MODEL)  # drop the inference-profile region
+    tag = re.sub(r"^anthropic\.", "", tag)                          # drop the Bedrock vendor prefix
+    tag = re.sub(r"-v\d+(:\d+)?$", "", tag)                         # drop the Bedrock version suffix
+    return re.sub(r"-\d{8}$", "", tag)                              # drop the release date
 
 
 def _supports_effort() -> bool:
@@ -82,7 +86,7 @@ def _supports_effort() -> bool:
     return bool(config.LLM_EFFORT) and "haiku-4-5" not in config.LLM_MODEL
 
 
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=1)  # one client per process; it holds the HTTP connection pool
 def client():
     """The SDK client for the configured provider (built once per process)."""
     import anthropic  # imported lazily: the pipeline runs fine without an LLM configured
@@ -91,14 +95,15 @@ def client():
     if config.LLM_PROVIDER == "bedrock" and config.LLM_BEDROCK_ENDPOINT == "runtime":
         return anthropic.AnthropicBedrock(aws_region=config.AWS_REGION)   # bedrock-runtime InvokeModel
     if config.LLM_PROVIDER == "bedrock":
-        return anthropic.AnthropicBedrockMantle(aws_region=config.AWS_REGION)
+        return anthropic.AnthropicBedrockMantle(aws_region=config.AWS_REGION)   # Bedrock Messages API endpoint
     raise LLMUnavailable(f"LLM_PROVIDER={config.LLM_PROVIDER!r}: LLM steps are disabled")
 
 
 def _provider_kwargs() -> dict:
+    # Extra request settings that depend on the provider and model.
     kwargs = {}
     if _supports_effort():
-        kwargs["output_config"] = {"effort": config.LLM_EFFORT}
+        kwargs["output_config"] = {"effort": config.LLM_EFFORT}   # "low" = fewer tokens, cheaper
     # Server-side refusal fallback is a Claude API feature; Bedrock rejects the parameter.
     if config.LLM_PROVIDER == "anthropic":
         kwargs.update(betas=[FALLBACK_BETA], fallbacks="default")
@@ -106,6 +111,7 @@ def _provider_kwargs() -> dict:
 
 
 def _refused(response) -> tuple[bool, dict]:
+    # A refusal is a normal response with stop_reason "refusal", not an exception.
     if getattr(response, "stop_reason", None) != "refusal":
         return False, {}
     details = getattr(response, "stop_details", None)
@@ -122,22 +128,22 @@ def parse(system: str, user: str, schema: type[T], usage: Usage | None = None,
     try:
         response = client().beta.messages.parse(
             model=model_id(),
-            max_tokens=max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-            output_format=schema,
+            max_tokens=max_tokens,           # hard cap on output length (and cost)
+            system=system,                   # the instructions: task, rules, output format
+            messages=[{"role": "user", "content": user}],   # the data for this call
+            output_format=schema,            # the answer must match this Pydantic model
             **_provider_kwargs(),
         )
     except anthropic.APIError as exc:          # 4xx/5xx after SDK retries, or network failure
         raise LLMUnavailable(f"{type(exc).__name__}: {exc}") from exc
     if usage is not None:
-        usage.add(response)
+        usage.add(response)              # count tokens even for refusals (they still cost)
     refused, details = _refused(response)
     if refused:
         if usage is not None:
             usage.refusals += 1
         return Result(parsed=None, refused=True, stop_details=details)
-    return Result(parsed=response.parsed_output)
+    return Result(parsed=response.parsed_output)   # already validated by the SDK
 
 
 def text(system: str, user: str, usage: Usage | None = None, max_tokens: int = 2000) -> Result:
@@ -162,5 +168,6 @@ def text(system: str, user: str, usage: Usage | None = None, max_tokens: int = 2
         if usage is not None:
             usage.refusals += 1
         return Result(parsed=None, refused=True, stop_details=details)
+    # The response is a list of content blocks; join the text ones into one string.
     answer = "".join(b.text for b in response.content if getattr(b, "type", None) == "text").strip()
     return Result(parsed=None, text=answer or None)

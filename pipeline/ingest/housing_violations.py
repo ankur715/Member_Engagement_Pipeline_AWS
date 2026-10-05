@@ -22,14 +22,17 @@ from pipeline.loaders import load_id_for, stage_and_merge
 from pipeline.redshift import fetch_all
 from pipeline.schemas import HOUSING_VIOLATIONS as SPEC
 
-SOURCE = "housing_violations"
-DATASET = "wvxf-dwi5"
-PAGE_SIZE = 1000
+SOURCE = "housing_violations"     # name used for S3 folders, load ids and the audit row
+DATASET = "wvxf-dwi5"              # NYC Open Data id of the "Housing Maintenance Code Violations" dataset
+PAGE_SIZE = 1000                   # rows per API request
+# Only the columns we use ($select) -- the full dataset has dozens.
 FIELDS = "violationid,zip,boro,class,inspectiondate,novdescription,violationstatus"
-HEAT_SECTIONS = ("27-2029", "27-2031")
+HEAT_SECTIONS = ("27-2029", "27-2031")   # housing code sections for heat and hot water
 
 
 def soql_where(zips: list[str], since: date) -> str:
+    # SoQL = Socrata's SQL-like query language. Filtering on the server means we
+    # download only the violations we need, not the whole city.
     zip_list = ",".join(f"'{z}'" for z in sorted(zips))
     return (f"violationstatus='Open' AND class in('B','C') "
             f"AND inspectiondate > '{since.isoformat()}' AND zip in({zip_list})")
@@ -40,11 +43,12 @@ def fetch_pages(zips: list[str], since: date):
     if config.NYC_OPEN_DATA_APP_TOKEN:
         s.headers["X-App-Token"] = config.NYC_OPEN_DATA_APP_TOKEN
     url = f"{config.NYC_OPEN_DATA_URL.rstrip('/')}/resource/{DATASET}.json"
-    offset = 0
+    offset = 0                                         # rows to skip; grows by PAGE_SIZE each loop
     while True:
         page = http.get_json(s, url, {"$select": FIELDS, "$where": soql_where(zips, since),
                                       "$order": "violationid", "$limit": PAGE_SIZE, "$offset": offset})
-        yield page
+        # $order makes paging stable: without a fixed order, rows can repeat or be skipped between pages.
+        yield page                                     # generator: the caller handles one page at a time
         if len(page) < PAGE_SIZE:                      # short page = last page
             return
         offset += PAGE_SIZE
@@ -54,27 +58,28 @@ def normalize(rows: list[dict]) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return (clean, rejects). Pure pandas -- unit tested without the API."""
     if not rows:
         return pd.DataFrame(columns=SPEC.data_columns), pd.DataFrame()
-    raw = pd.DataFrame(rows).astype("string")
+    raw = pd.DataFrame(rows).astype("string")         # everything as text first; types are set below
     for col in ("zip", "boro", "class", "inspectiondate", "novdescription"):
         if col not in raw.columns:                     # Socrata omits null fields entirely
             raw[col] = pd.NA
-    desc = raw["novdescription"].fillna("")
+    desc = raw["novdescription"].fillna("")           # the violation's text description
     df = pd.DataFrame({
         "violation_id": raw["violationid"].str.strip(),
-        "zip": raw["zip"].str.strip().str[:5].replace({"": pd.NA}),
+        "zip": raw["zip"].str.strip().str[:5].replace({"": pd.NA}),     # "11226-1234" -> "11226"
         "boro": raw["boro"].str.strip().str.upper(),
-        "violation_class": raw["class"].str.strip().str.upper(),
+        "violation_class": raw["class"].str.strip().str.upper(),      # "c" -> "C"
         "is_heat_hot_water": desc.str.contains("|".join(HEAT_SECTIONS), regex=True),
-        "inspection_date": pd.to_datetime(raw["inspectiondate"], errors="coerce").dt.date,
-        "nov_description": desc.str.slice(0, 500),
+        "inspection_date": pd.to_datetime(raw["inspectiondate"], errors="coerce").dt.date,  # bad date -> NaT
+        "nov_description": desc.str.slice(0, 500),                    # fits the VARCHAR(500) column
     })
+    # Collect every reason a row is bad (a row can have several), then split clean vs rejects.
     reasons = pd.Series("", index=df.index)
     reasons[df["violation_id"].isna()] += "missing_violation_id;"
     reasons[df["zip"].isna() | ~df["zip"].fillna("").str.fullmatch(r"\d{5}")] += "invalid_zip;"
     reasons[~df["violation_class"].isin(["A", "B", "C"])] += "invalid_class;"
     bad = reasons != ""
-    rejects = raw.loc[bad].assign(reject_reason=reasons[bad])
-    clean = df.loc[~bad].drop_duplicates(subset=["violation_id"])
+    rejects = raw.loc[bad].assign(reject_reason=reasons[bad])   # keep the original values for review
+    clean = df.loc[~bad].drop_duplicates(subset=["violation_id"])   # safety net: one row per violation id
     return clean.reset_index(drop=True), rejects
 
 
@@ -82,18 +87,22 @@ def main(batch_date: str | None = None) -> dict:
     batch_date = batch_date or date.today().isoformat()
     # Only ZIPs where current members live -- keeps the public pull small and relevant.
     zips = [r[0] for r in fetch_all("SELECT DISTINCT zip FROM core.member_eligibility WHERE is_current AND zip IS NOT NULL;")]
-    since = date.fromisoformat(batch_date) - timedelta(days=3 * 365)
+    since = date.fromisoformat(batch_date) - timedelta(days=3 * 365)   # last 3 years
 
+    # 1. Pull every page and save each one to S3 exactly as received (replayable).
     rows = []
-    run_ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    run_ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")    # keeps each run's pages separate
     for n, page in enumerate(fetch_pages(zips, since)):
         s3_io.put_bytes(f"raw/{SOURCE}/dt={batch_date}/{run_ts}_page{n:03d}.json",
                         json.dumps(page).encode(), "application/json")
         rows.extend(page)
 
+    # 2. Clean and validate; bad rows go to the rejects folder with a reason.
     clean, rejects = normalize(rows)
     if len(rejects):
         s3_io.put_bytes(f"rejects/{SOURCE}/dt={batch_date}/rejects.csv", rejects.to_csv(index=False).encode(), "text/csv")
+    # 3. Load: Parquet -> COPY -> stored procedure, in one transaction. The procedure
+    #    replaces the whole table (snapshot), since closed violations drop out of the feed.
     stage_and_merge(load_id_for(SOURCE, batch_date), SOURCE, [(SPEC, clean)], "core.sp_merge_housing_violations",
                     source_uri=f"{config.NYC_OPEN_DATA_URL.rstrip('/')}/resource/{DATASET}.json",
                     rows_in=len(rows), rows_rejected=len(rejects))

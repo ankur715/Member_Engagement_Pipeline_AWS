@@ -36,6 +36,8 @@ class Check:
 # Activity types that are phone calls (used by the outreach-compliance check).
 CALL_TYPES = "('Wellness Call', 'Care Gap Outreach', 'Welcome Call')"
 
+# The full list of checks, run in this order. To add one: append a Check here
+# (and add a row to the README's DQ table).
 CHECKS = [
     # --- integrity (Redshift doesn't enforce keys, so we do) ---
     Check("scd2_single_current_row", "error",
@@ -52,6 +54,7 @@ CHECKS = [
 
     # --- completeness / freshness ---
     Check("member_files_loaded", "error",
+          # load_id ends with the batch date ("...-2026-09-28"), so RIGHT(load_id, 10) is the date.
           """SELECT COUNT(DISTINCT entity) FROM ops.load_audit
              WHERE LEFT(entity, 12) = 'member_file_' AND status = 'succeeded'
                AND RIGHT(load_id, 10) = %(batch_date)s""",
@@ -76,7 +79,7 @@ CHECKS = [
              LEFT JOIN (SELECT DISTINCT member_id FROM core.member_eligibility) m ON m.member_id = a.member_id""",
           lambda v: v <= 10, "% of event attendees not on any roster (walk-ins / typos)"),
 
-    # --- anomaly ---
+    # --- anomaly: compares today's volume with the 7 days before it ---
     Check("activity_volume_vs_7day_avg_pct", "warn",
           """SELECT COALESCE(100.0 * ABS(t.n - h.avg_n) / NULLIF(h.avg_n, 0), 0) FROM
                (SELECT COUNT(*) AS n FROM core.engagements WHERE activity_date = %(batch_date)s) t,
@@ -175,10 +178,12 @@ CHECKS = [
              JOIN core.contact_preferences c ON c.member_id = q.member_id AND c.channel IN ('phone', 'all')""",
           lambda v: v == 0, "No member who opted out of phone contact is on the wellness-check call list"),
     Check("llm_rules_agreement_pct", "warn",
+          # NULLIF(..., 0) avoids dividing by zero when the LLM hasn't run; COALESCE then returns 100.
           """SELECT COALESCE(100.0 * SUM(both_methods) / NULLIF(SUM(both_methods + rules_only + llm_only), 0), 100)
              FROM analytics.v_sdoh_method_agreement""",
           lambda v: v >= 70, "LLM vs. rule-based SDoH tags agree on >= 70% of tags (drift monitor; 100 if not run)"),
     Check("analytics_exposes_no_identifiers", "error",
+          # Reads the column catalog, so a new view that exposes an identifier fails this check.
           """SELECT COUNT(*) FROM svv_columns
              WHERE table_schema = 'analytics'
                AND column_name IN ('member_id', 'first_name', 'last_name', 'phone', 'dob', 'notes', 'address')""",
@@ -192,6 +197,7 @@ def evaluate(check: Check, value: float) -> dict:
             "observed_value": value, "description": check.description}
 
 
+# Instructions for the optional LLM triage note (see explain_failures below).
 EXPLAIN_SYSTEM_PROMPT = """You are the on-call data engineer for a healthcare member-engagement \
 pipeline (health-plan rosters, Salesforce CHW activity, events, a do-not-contact sheet, claims, \
 HRA surveys, NYC housing data, NOAA weather alerts) loading into Redshift. Given failed data \
@@ -208,6 +214,8 @@ def explain_failures(batch_date: str, failed: list[dict], history: dict[str, lis
     load counts) -- never member rows. Returns None if the LLM is off or fails."""
     if not failed or not llm.enabled():
         return None
+    # Build a plain-text summary: each failed check with its last few values,
+    # then today's load counts. This is everything the model sees.
     lines = [f"Batch date: {batch_date}", "", "Failed checks:"]
     for r in failed:
         trend = ", ".join(f"{d}: {v}" for d, v in history.get(r["check_name"], []))
@@ -219,6 +227,7 @@ def explain_failures(batch_date: str, failed: list[dict], history: dict[str, lis
     try:
         return llm.text(EXPLAIN_SYSTEM_PROMPT, "\n".join(lines), max_tokens=1500).text
     except llm.LLMUnavailable as exc:
+        # The note is optional: the checks and the alert still work without it.
         print(f"LLM explanation skipped: {exc}")
         return None
 
@@ -226,11 +235,13 @@ def explain_failures(batch_date: str, failed: list[dict], history: dict[str, lis
 def _context(cur, batch_date: str, failed: list[dict]) -> tuple[dict, list]:
     """Recent values of the failed checks + today's load audit (aggregates only)."""
     history = {}
+    # Last 7 recorded values of each failed check, so the model can tell a spike from a long-running issue.
     for r in failed:
         cur.execute("""SELECT batch_date, observed_value FROM ops.dq_results
                        WHERE check_name = %s AND batch_date < %s
                        ORDER BY batch_date DESC LIMIT 7;""", (r["check_name"], batch_date))
         history[r["check_name"]] = [(str(d), v) for d, v in cur.fetchall()]
+    # Today's loads: which sources ran, and how many rows came in, loaded and got rejected.
     cur.execute("""SELECT entity, status, rows_in, rows_staged, rows_rejected FROM ops.load_audit
                    WHERE RIGHT(load_id, 10) = %s OR started_at::DATE = %s::DATE
                    ORDER BY started_at;""", (batch_date, batch_date))
@@ -245,7 +256,7 @@ def run_checks(batch_date: str) -> list[dict]:
         with conn.cursor() as cur:
             # 1. Run every check query and evaluate its number.
             for check in CHECKS:
-                cur.execute(check.sql, {"batch_date": batch_date})
+                cur.execute(check.sql, {"batch_date": batch_date})   # fills in %(batch_date)s
                 value = cur.fetchone()[0]
                 # NULL (e.g. no rows to average) counts as 0.
                 results.append(evaluate(check, float(value) if value is not None else 0.0))
@@ -260,9 +271,9 @@ def run_checks(batch_date: str) -> list[dict]:
                     """INSERT INTO ops.dq_results (batch_date, check_name, severity, passed, observed_value, details, explanation)
                        VALUES (%s, %s, %s, %s, %s, %s, %s);""",
                     (batch_date, r["check_name"], r["severity"], r["passed"], str(r["observed_value"]), r["description"],
-                     explanation if not r["passed"] else None),
+                     explanation if not r["passed"] else None),   # the note is stored only on failed rows
                 )
-        conn.commit()
+        conn.commit()                       # the DELETE and INSERTs become visible together
     finally:
         conn.close()
 
@@ -270,10 +281,10 @@ def run_checks(batch_date: str) -> list[dict]:
     for r in results:
         print(f"[{'PASS' if r['passed'] else r['severity'].upper()}] {r['check_name']} = {r['observed_value']}")
 
-    # 5. Only failed ERROR-level checks stop the pipeline; warnings are just recorded.
     if explanation:
         print("\nTriage note (LLM-generated):\n" + explanation)
 
+    # 5. Only failed ERROR-level checks stop the pipeline; warnings are just recorded.
     errors = [r for r in results if not r["passed"] and r["severity"] == "error"]
     if errors:
         message = (f"Batch {batch_date} failed {len(errors)} data quality check(s): "
