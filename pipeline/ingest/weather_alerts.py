@@ -18,7 +18,7 @@ from pipeline import config, http, s3_io
 from pipeline.loaders import load_id_for, stage_and_merge
 from pipeline.schemas import WEATHER_ALERT_COUNTIES, WEATHER_ALERTS
 
-SOURCE = "weather_alerts"
+SOURCE = "weather_alerts"          # name used for S3 folders, load ids and the audit row
 
 # NWS event names (including the 2024-25 renames: Excessive -> Extreme Heat,
 # Wind Chill -> Extreme Cold / Cold Weather).
@@ -29,6 +29,7 @@ COLD_EVENTS = {"Cold Weather Advisory", "Extreme Cold Warning", "Extreme Cold Wa
 
 
 def hazard_for(event: str) -> str:
+    # Only heat and cold matter for the wellness-check queue; everything else is "other".
     if event in HEAT_EVENTS:
         return "heat"
     if event in COLD_EVENTS:
@@ -39,17 +40,19 @@ def hazard_for(event: str) -> str:
 def same_to_fips(code: str) -> str | None:
     # SAME = "0" + state FIPS (2) + county FIPS (3). Marine/zone codes start with 07x.
     code = (code or "").strip()
+    # "036047" -> "36047" (Kings County). Anything else -> None (not a county).
     return code[1:] if len(code) == 6 and code.startswith("0") and code[1:3] != "73" else None
 
 
 def fetch() -> dict:
     s = http.session(auth=False)                       # public API: no bearer token
     s.headers["User-Agent"] = config.NWS_USER_AGENT    # required by api.weather.gov
-    s.headers["Accept"] = "application/geo+json"
+    s.headers["Accept"] = "application/geo+json"      # ask for GeoJSON (alerts as "features")
     return http.get_json(s, f"{config.NWS_API_URL.rstrip('/')}/alerts/active", {"area": "NY"})
 
 
 def _utc(value) -> pd.Timestamp:
+    # Redshift TIMESTAMP has no time zone, so every time is stored as UTC.
     ts = pd.to_datetime(value, errors="coerce", utc=True)   # "-04:00" offsets -> UTC
     return ts.tz_localize(None) if not pd.isna(ts) else pd.NaT
 
@@ -60,7 +63,7 @@ def to_frames(payload: dict, seen_at: datetime) -> tuple[pd.DataFrame, pd.DataFr
     for feature in payload.get("features", []):
         p = feature.get("properties", {})
         if not p.get("id") or not p.get("event"):
-            continue
+            continue                                   # can't key or classify it: skip
         alerts.append({
             "alert_id": p["id"],
             "event": p["event"],
@@ -74,6 +77,7 @@ def to_frames(payload: dict, seen_at: datetime) -> tuple[pd.DataFrame, pd.DataFr
             "headline": (p.get("headline") or "")[:500],
             "seen_at": seen_at,
         })
+        # One alert covers many counties -> one alert_counties row per county.
         for code in (p.get("geocode") or {}).get("SAME", []):
             fips = same_to_fips(code)
             if fips:
@@ -85,11 +89,14 @@ def to_frames(payload: dict, seen_at: datetime) -> tuple[pd.DataFrame, pd.DataFr
 
 def main(batch_date: str | None = None) -> dict:
     batch_date = batch_date or date.today().isoformat()
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)   # when we saw these alerts
     payload = fetch()
+    # Land the raw response first, exactly as received (replayable).
     s3_io.put_bytes(f"raw/{SOURCE}/dt={batch_date}/{now:%Y%m%dT%H%M%S}.json",
                     json.dumps(payload).encode(), "application/json")
     alerts, counties = to_frames(payload, now)
+    # The merge upserts on alert_id: a new alert gets first_seen_at, and an alert
+    # already stored only has its details and last_seen_at refreshed.
     # Zero active alerts is normal (most days) -- the load still runs so the
     # audit row records a successful, empty pull.
     stage_and_merge(load_id_for(SOURCE, batch_date), SOURCE,

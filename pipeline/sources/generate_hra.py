@@ -24,8 +24,9 @@ from pipeline.reference_data import member_roster
 from pipeline.sources import rng_for
 from pipeline.sources.generate_claims import frailty
 
-PREFIX = "raw/hra"
+PREFIX = "raw/hra"         # the "vendor drop" location in S3 that ingest/hra.py reads
 
+# The many ways one answer arrives in a real export; the ingest must map them all.
 YES = ["Yes", "Y", "yes", True, 1]
 NO = ["No", "N", "no", False, 0]
 MOBILITY = {
@@ -39,15 +40,17 @@ COST = {True: ["Often can't pay", "Sometimes"], False: ["Never", "No problem"]}
 
 
 def _h(key: str) -> int:
+    # Stable hash of a string -> big int (Python's hash() changes between runs).
     return int(hashlib.md5(key.encode()).hexdigest(), 16)
 
 
 def member_profile(member_id: str) -> dict:
     """A member's true circumstances (stable across their surveys)."""
-    f = frailty(member_id)
-    r = random.Random(_h("hra-profile-" + member_id))
+    f = frailty(member_id)                             # 0..1, shared with the claims generator
+    r = random.Random(_h("hra-profile-" + member_id))  # seeded per member -> same profile every run
     return {
         "lives_alone": r.random() < 0.35,
+        # Frailer members are more likely to report severe mobility limits.
         "mobility": "severe" if r.random() < 0.1 + 0.4 * f else ("some" if r.random() < 0.3 else "none"),
         "heat": r.random() > 0.12,
         "cooling": r.random() > 0.25,
@@ -56,12 +59,13 @@ def member_profile(member_id: str) -> dict:
 
 
 def survey_day_of_year(member_id: str) -> int:
+    # Each member's fixed survey day (0-364), spread evenly across the year.
     return _h("hra-day-" + member_id) % 365
 
 
 def _responses(day: date) -> list[dict]:
     """Real survey responses submitted on one day (members whose survey day is today)."""
-    rng = rng_for("hra", day.isoformat())
+    rng = rng_for("hra", day.isoformat())             # seeded by date: same file every time for a day
     rows = []
     for m in member_roster():
         mid = m["member_id"]
@@ -70,7 +74,7 @@ def _responses(day: date) -> list[dict]:
         if _h(f"hra-skip-{mid}-{day.year}") % 5 == 0:
             continue                                   # ~1 in 5 members skip their HRA this year
         p = member_profile(mid)
-        partial = rng.random() < 0.15
+        partial = rng.random() < 0.15                  # ~15% of surveys are left half-finished
         submitted = datetime.combine(day, time(rng.randint(9, 19), rng.randint(0, 59)), tzinfo=timezone.utc)
         answers = {
             "q_lives_alone": rng.choice(YES if p["lives_alone"] else NO),
@@ -85,6 +89,7 @@ def _responses(day: date) -> list[dict]:
             "response_id": f"HRA-{mid[3:]}-{day:%Y%m%d}",
             "member_ref": f" {mid.lower()}" if rng.random() < 0.15 else mid,      # hand-typed id
             "status": "partial" if partial else "complete",
+            # Two timestamp formats in the same file, as real exports often have.
             "submitted_at": rng.choice([submitted.isoformat(), submitted.strftime("%m/%d/%Y %I:%M %p")]),
             "updated_at": submitted.isoformat(),
             "answers": answers,
@@ -100,7 +105,7 @@ def build_rows(day: date) -> list[dict]:
     # with a later updated_at -- the merge must keep this version.
     earlier = _responses(day - timedelta(days=3))
     if earlier:
-        fixed = json.loads(json.dumps(earlier[0]))
+        fixed = json.loads(json.dumps(earlier[0]))     # deep copy via JSON round trip
         member = fixed["member_ref"].strip().upper()
         fixed["status"] = "complete"
         fixed["updated_at"] = datetime.combine(day, time(8, 0), tzinfo=timezone.utc).isoformat()
@@ -114,6 +119,7 @@ def build_rows(day: date) -> list[dict]:
 
 
 def to_jsonl(rows: list[dict]) -> bytes:
+    # JSON Lines: one JSON object per line (what the vendor delivers).
     return "\n".join(json.dumps(r) for r in rows).encode()
 
 
@@ -124,6 +130,7 @@ def main(batch_date: str, history: bool = False) -> list[str]:
     s3_io.put_bytes(key, to_jsonl(build_rows(day)), "application/x-ndjson")
     keys.append(key)
     if history:
+        # One-time backfill: the previous 365 days in a single file, oldest first.
         rows = [r for d in range(365, 0, -1) for r in build_rows(day - timedelta(days=d))]
         hkey = f"{PREFIX}/dt={batch_date}/hra_responses_history_{day:%Y%m%d}.jsonl"
         s3_io.put_bytes(hkey, to_jsonl(rows), "application/x-ndjson")
