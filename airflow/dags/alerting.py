@@ -20,8 +20,14 @@ from airflow.providers.smtp.notifications.smtp import SmtpNotifier
 
 log = logging.getLogger(__name__)
 
-# Set ALERT_EMAIL in the environment (e.g. .env); the default is a placeholder.
-ALERT_RECIPIENT = os.environ.get("ALERT_EMAIL", "alerts@example.com")
+
+def alert_recipient() -> str:
+    # Set ALERT_EMAIL in .env (or the environment); the default is a placeholder.
+    # Read at send time, after pipeline.config has loaded .env: this module is
+    # imported when the DAG file is parsed, before any pipeline code runs.
+    from pipeline import config  # noqa: F401  (importing it loads .env)
+    return os.environ.get("ALERT_EMAIL") or "alerts@example.com"
+
 
 # Subject and body are Jinja templates: Airflow fills in {{ ti.* }} (the task
 # instance) and {{ exception }}; on_task_failure adds load_id, triage_note and triage_status.
@@ -48,9 +54,10 @@ HTML_CONTENT = """
 def build_failure_notifier() -> SmtpNotifier:
     # A new notifier per email: rendering writes the rendered text back onto the
     # notifier's own fields, so a shared instance would reuse the first email.
+    recipient = alert_recipient()
     return SmtpNotifier(
-        to=ALERT_RECIPIENT,
-        from_email=ALERT_RECIPIENT,
+        to=recipient,
+        from_email=recipient,
         smtp_conn_id="smtp_default",       # SMTP host and login are stored in this Airflow Connection
         subject=SUBJECT,
         html_content=HTML_CONTENT,
@@ -62,9 +69,12 @@ def _error_text(context) -> str:
     return f"{type(exc).__name__}: {exc}" if exc is not None else "unknown error"
 
 
-def _run_started_at(context):
-    # Audit timestamps are naive UTC; the DAG run's start bounds "this run's" failed rows.
-    start = getattr(context.get("dag_run"), "start_date", None)
+def _attempt_started_at(context):
+    # Only a failed audit row written by THIS attempt counts as "the load that
+    # just failed" -- not one left by an earlier attempt or an earlier run of the
+    # same DAG run (found live: a rerun reused a stale row with an old error).
+    # Audit timestamps are naive UTC. Falls back to the DAG run's start.
+    start = getattr(context.get("ti"), "start_date", None) or getattr(context.get("dag_run"), "start_date", None)
     if start is None:
         return None
     return start.astimezone(timezone.utc).replace(tzinfo=None) if start.tzinfo else start
@@ -80,7 +90,7 @@ def on_task_failure(context) -> None:
     try:
         from pipeline.loaders import mark_task_failed
         from pipeline.triage.tools import TASKS
-        since = _run_started_at(context)
+        since = _attempt_started_at(context)
         prefix = TASKS.get(ti.task_id, {}).get("entity_prefix") if since else None
         load_id = mark_task_failed(ti.task_id, prefix, batch_date, since, error)
     except Exception:

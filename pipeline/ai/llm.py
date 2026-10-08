@@ -86,10 +86,21 @@ def _supports_effort() -> bool:
     return bool(config.LLM_EFFORT) and "haiku-4-5" not in config.LLM_MODEL
 
 
+def _sdk():
+    # Imported lazily: the pipeline runs fine without an LLM configured. A missing
+    # SDK (e.g. an environment built before it was added) is "unavailable", so
+    # optional LLM steps skip instead of crashing the task.
+    try:
+        import anthropic
+    except ImportError as exc:
+        raise LLMUnavailable(f"the anthropic SDK isn't installed in this environment ({exc})") from exc
+    return anthropic
+
+
 @lru_cache(maxsize=1)  # one client per process; it holds the HTTP connection pool
 def client():
     """The SDK client for the configured provider (built once per process)."""
-    import anthropic  # imported lazily: the pipeline runs fine without an LLM configured
+    anthropic = _sdk()
     if config.LLM_PROVIDER == "anthropic":
         return anthropic.Anthropic()        # ANTHROPIC_API_KEY or an `ant auth login` profile
     if config.LLM_PROVIDER == "bedrock" and config.LLM_BEDROCK_ENDPOINT == "runtime":
@@ -124,7 +135,7 @@ def parse(system: str, user: str, schema: type[T], usage: Usage | None = None,
     """One structured-output call: returns Result.parsed as a validated `schema` instance."""
     if not enabled():
         raise LLMUnavailable("LLM_PROVIDER is none")
-    import anthropic
+    anthropic = _sdk()
     try:
         response = client().beta.messages.parse(
             model=model_id(),
@@ -150,7 +161,7 @@ def text(system: str, user: str, usage: Usage | None = None, max_tokens: int = 2
     """One plain-text call (e.g. a short explanation)."""
     if not enabled():
         raise LLMUnavailable("LLM_PROVIDER is none")
-    import anthropic
+    anthropic = _sdk()
     try:
         response = client().beta.messages.create(
             model=model_id(),

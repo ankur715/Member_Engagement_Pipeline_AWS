@@ -1,4 +1,4 @@
-# Member Engagement Data Pipeline (AWS)
+# Member Engagement Data Pipeline (AWS) with LLM Utilities and a Pipeline Triage Agent
 
 A production-style data platform for a **community health worker (CHW)
 program** serving health-plan members. The program's customers are health
@@ -581,11 +581,52 @@ python -m pipeline.triage.run load_claims-2026-10-02 --task load_claims --write 
   `get_load_audit`, then diagnosed the missing health-plan delivery with
   high confidence. It took 3 steps, 8,052 tokens and 2 Redshift queries,
   about **$0.0006**. The note was saved on the audit row.
-- **What the live run caught:** the staging-count view needed USAGE on the
-  `staging` schema (fixed forward in V018).
+- **Through Airflow, end to end:** the real `data_quality` task ran for a
+  date with no loads. Three error-level checks failed, and the failure
+  callback marked the load failed and ran the agent. It then emailed the
+  note.
+  - **The agent's investigation:** in one step, it pulled file history and
+    rejects for all three missing sources, plus the pipeline config.
+  - **Diagnosis:** files weren't delivered for those sources. It took 3
+    steps, 11,865 tokens and 4 Redshift queries, about **$0.001**.
+- **What the live runs caught** that unit tests couldn't. Each was fixed
+  with a regression test:
+  - The staging-count view needed USAGE on the `staging` schema (fixed
+    forward in V018).
+  - Airflow's venv predated the `anthropic` package. The `ImportError`
+    escaped the optional DQ explanation and crashed the `data_quality`
+    task, which would have happened on every scheduled run with the LLM
+    on. A missing SDK now counts as "LLM unavailable", and the explanation
+    can never fail the checks.
+    - **The agent diagnosed this bug itself** on that first run: "the data
+      quality checks did not run due to a missing Python module
+      'anthropic'… check the environment" (second email below).
+  - `ALERT_EMAIL` was read when the DAG file was parsed, before `.env`
+    was loaded, so emails would have gone to the placeholder address.
+    It's now read at send time.
+  - The callback reused a failed audit row from an earlier attempt, so the
+    note quoted a stale error. Only the current attempt's row is reused now.
 - **Unit tests** cover the tool loop, caps, the no-LLM skip, a data
   quality failure, PHI redaction and failure isolation against a mocked
   Bedrock client.
+
+**The failure email with the agent's note.** The exception includes the
+data quality checks that failed, and the DQ module's own short LLM note.
+Below that, the triage agent's diagnosis, evidence, suggested fix (for a
+person to approve) and confidence, with its step, token and tool count.
+
+![Triage alert email](pics/triage_alert_email.jpg)
+
+**The agent finding a real bug.** On the first live run, the task crashed
+because Airflow's environment was missing a Python package. The agent saw
+that no checks had run and diagnosed the missing module, using two tools.
+
+![Triage diagnosing a missing module](pics/triage_alert_module.png)
+
+**Notes saved on the audit rows** (`ops.load_audit`), with the model and
+tokens used for each failed load.
+
+![Triage notes in the load audit](pics/triage_audit_note.jpg)
 
 ## Design decisions worth talking about
 
@@ -789,7 +830,7 @@ airflow standalone          # http://localhost:8080, unpause member_engagement_p
 ## Tests
 
 ```bash
-pytest -q tests                                   # 187 unit tests, no AWS, internet or LLM needed (moto, FastAPI TestClient, fake Claude and Bedrock clients)
+pytest -q tests                                   # 188 unit tests, no AWS, internet or LLM needed (moto, FastAPI TestClient, fake Claude and Bedrock clients)
 cd airflow && pytest -q tests                     # DAG integrity + the failure callback (needs the Airflow venv + env vars above)
 ```
 

@@ -226,9 +226,10 @@ def explain_failures(batch_date: str, failed: list[dict], history: dict[str, lis
               for a in audit] or ["- none recorded"]
     try:
         return llm.text(EXPLAIN_SYSTEM_PROMPT, "\n".join(lines), max_tokens=1500).text
-    except llm.LLMUnavailable as exc:
-        # The note is optional: the checks and the alert still work without it.
-        print(f"LLM explanation skipped: {exc}")
+    except Exception as exc:
+        # The note is optional: the checks and the alert must work without it,
+        # whatever went wrong (LLM off or down, SDK missing, an unexpected bug).
+        print(f"LLM explanation skipped: {type(exc).__name__}: {exc}")
         return None
 
 
