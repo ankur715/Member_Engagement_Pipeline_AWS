@@ -20,8 +20,14 @@ from airflow.providers.smtp.notifications.smtp import SmtpNotifier
 
 log = logging.getLogger(__name__)
 
-# Set ALERT_EMAIL in the environment (e.g. .env); the default is a placeholder.
-ALERT_RECIPIENT = os.environ.get("ALERT_EMAIL", "alerts@example.com")
+
+def alert_recipient() -> str:
+    # Set ALERT_EMAIL in .env (or the environment); the default is a placeholder.
+    # Read at send time, after pipeline.config has loaded .env: this module is
+    # imported when the DAG file is parsed, before any pipeline code runs.
+    from pipeline import config  # noqa: F401  (importing it loads .env)
+    return os.environ.get("ALERT_EMAIL") or "alerts@example.com"
+
 
 # Subject and body are Jinja templates: Airflow fills in {{ ti.* }} (the task
 # instance) and {{ exception }}; on_task_failure adds load_id, triage_note and triage_status.
@@ -48,9 +54,10 @@ HTML_CONTENT = """
 def build_failure_notifier() -> SmtpNotifier:
     # A new notifier per email: rendering writes the rendered text back onto the
     # notifier's own fields, so a shared instance would reuse the first email.
+    recipient = alert_recipient()
     return SmtpNotifier(
-        to=ALERT_RECIPIENT,
-        from_email=ALERT_RECIPIENT,
+        to=recipient,
+        from_email=recipient,
         smtp_conn_id="smtp_default",       # SMTP host and login are stored in this Airflow Connection
         subject=SUBJECT,
         html_content=HTML_CONTENT,

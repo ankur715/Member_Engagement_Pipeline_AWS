@@ -104,3 +104,12 @@ def test_real_smtp_notifier_renders_the_triage_note():
     n.render_template_fields(ctx)
     assert "DIAGNOSIS: drop missing" in n.html_content and "load_claims-2026-10-02" in n.html_content
     assert n.subject == "Airflow FAILED: member_engagement_pipeline.load_claims (run r1)"
+
+
+def test_alert_recipient_is_read_at_send_time(monkeypatch):
+    # Not frozen at DAG-parse time: a value set later (e.g. by .env loading) is used.
+    monkeypatch.setenv("ALERT_EMAIL", "oncall@example.org")
+    n = alerting.build_failure_notifier()
+    assert n.to == "oncall@example.org" and n.from_email == "oncall@example.org"
+    monkeypatch.setenv("ALERT_EMAIL", "")
+    assert alerting.alert_recipient() == "alerts@example.com"
