@@ -568,10 +568,24 @@ python -m pipeline.triage.run load_claims-2026-10-02 --task load_claims         
 python -m pipeline.triage.run load_claims-2026-10-02 --task load_claims --write   # ...and save it
 ```
 
-**Status:** built and unit-tested against a mocked Bedrock client (the
-tool loop, the step and token caps, the no-LLM skip, a data quality
-failure, PHI redaction and failure isolation). It hasn't been run live on
-Bedrock yet, and the Terraform policy hasn't been applied.
+**Verified live:**
+- **Setup:** migrations V016–V018 applied, `triage_reader` created, and
+  the Terraform policy applied.
+- **Least privilege:** as `triage_reader`, the three ops objects are
+  readable, while every staging, core, care and analytics table is denied,
+  and so are writes. The IAM policy simulator allows `InvokeModel` only on
+  the two triage models, and denies other models, Bedrock Agents and
+  Knowledge Bases.
+- **First live run:** `load_claims` failed for a date with no claims drop.
+  Nova Lite called `get_file_history` (0 files that day) and
+  `get_load_audit`, then diagnosed the missing health-plan delivery with
+  high confidence. It took 3 steps, 8,052 tokens and 2 Redshift queries,
+  about **$0.0006**. The note was saved on the audit row.
+- **What the live run caught:** the staging-count view needed USAGE on the
+  `staging` schema (fixed forward in V018).
+- **Unit tests** cover the tool loop, caps, the no-LLM skip, a data
+  quality failure, PHI redaction and failure isolation against a mocked
+  Bedrock client.
 
 ## Design decisions worth talking about
 
@@ -815,10 +829,10 @@ couldn't (the LLM fixes are listed under [LLM utilities](#llm-utilities)):
   eligible on Bedrock (one `.env` line); build a small hand-labeled set of
   varied notes to measure the LLM tagger properly; use the Message Batches
   API for bulk re-tagging at lower cost.
-- **Triage agent next steps.** A first live run on Bedrock with Nova Lite
-  and Haiku on a few staged failures (missing file, schema change, DQ
-  failure) to compare diagnoses; a small set of past incidents with known
-  causes to score it.
+- **Triage agent next steps.** Live runs on more staged failures (schema
+  change, DQ failure, rejects spike) with Nova Lite and Haiku to compare
+  diagnoses, and a small set of past incidents with known causes to score
+  it.
 - **Production hardening.** Secrets Manager instead of `.env`, a
   VPC-private Redshift workgroup with Airflow on MWAA or ECS, and AWS
   Transfer Family for health-plan SFTP drops.
