@@ -479,7 +479,10 @@ failing run. Results are cached per run, so a repeated tool call is free.
   - The tools connect as `triage_reader` (`python -m pipeline.triage.setup_reader`).
     Its only role, `triage_reader_ro` (V017), has SELECT on exactly three
     objects: `ops.load_audit`, `ops.dq_results` and
-    `ops.v_triage_staging_counts`.
+    `ops.v_triage_staging_counts`. It also has USAGE on the `staging`
+    schema, which Redshift requires for that view (V018), but no SELECT on
+    any staging table. That was verified live: reading any PHI table or
+    writing anything is denied.
   - There is no free-form SQL. The connection wrapper runs only *named*
     queries from a fixed dictionary, and a test checks that each one is a
     single SELECT on those three objects.
@@ -551,7 +554,7 @@ every run.
 **Setup** (once):
 
 ```bash
-python -m pipeline.migrate               # V016: triage columns; V017: read-only role + staging-count view
+python -m pipeline.migrate               # V016: triage columns; V017-V018: read-only role + staging-count view
 python -m pipeline.triage.setup_reader   # creates triage_reader (TRIAGE_REDSHIFT_PASSWORD in .env)
 cd infra/terraform && terraform apply    # Bedrock invoke permission for the two triage models
 ```
@@ -824,7 +827,7 @@ couldn't (the LLM fixes are listed under [LLM utilities](#llm-utilities)):
 
 ```
 infra/terraform/     S3 lake, IAM (least privilege), Redshift Serverless, usage limit, budget
-sql/redshift/        V001-V017 versioned migrations (schemas, tables, staging, ops/SLAs, procedures, views, RBAC,
+sql/redshift/        V001-V018 versioned migrations (schemas, tables, staging, ops/SLAs, procedures, views, RBAC,
                      claims, HRA, housing violations, weather alerts, vulnerability index, LLM agreement, triage)
 pipeline/            config, s3_io, redshift, loaders (Parquet->COPY->MERGE), schemas, phi, migrate, watermarks, http
   sources/           simulators: health-plan rosters, claims extracts, HRA survey exports
