@@ -12,8 +12,8 @@ choose another batch, a table or a query, and nothing here writes anything.
 
 A whole investigation is at most 4 small queries on one connection. Results
 are COUNTS and IDs only: reject files are read for their reject_reason column
-alone, error text is run through phi.redact(), and no tool returns a row of
-member data.
+alone, error text is run through phi.redact() (keeping batch dates), and no
+tool returns a row of member data.
 """
 import csv
 import io
@@ -124,7 +124,7 @@ class TriageTarget:
 
 def _redact(v):
     # Free text (error messages) can quote data values: strip identifiers first.
-    return phi.redact(v) if isinstance(v, str) else v
+    return phi.redact(v, keep_dates=True) if isinstance(v, str) else v
 
 
 class Toolbox:
