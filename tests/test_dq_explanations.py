@@ -48,3 +48,18 @@ def test_llm_failure_degrades_to_none(fake):
         raise llm.LLMUnavailable("down")
     fake(boom)
     assert dq.explain_failures("2026-10-02", FAILED, HISTORY, AUDIT) is None
+
+
+def test_missing_sdk_or_any_error_never_breaks_the_checks(monkeypatch):
+    # Found live: Airflow's venv lacked the anthropic package, and the ImportError
+    # crashed the data_quality task. A missing SDK is now LLMUnavailable...
+    import sys
+    monkeypatch.setattr(config, "LLM_PROVIDER", "bedrock")
+    monkeypatch.setitem(sys.modules, "anthropic", None)          # makes `import anthropic` fail
+    with pytest.raises(llm.LLMUnavailable, match="isn't installed"):
+        llm.text("s", "u")
+    failed = [{"check_name": "x", "severity": "error", "observed_value": 1.0, "description": "d"}]
+    assert dq.explain_failures("2026-10-07", failed, {}, []) is None
+    # ...and any other error in the optional explanation is swallowed too.
+    monkeypatch.setattr(llm, "text", lambda *a, **k: (_ for _ in ()).throw(KeyError("bug")))
+    assert dq.explain_failures("2026-10-07", failed, {}, []) is None
