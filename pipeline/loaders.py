@@ -165,6 +165,40 @@ def _record_failure(load_id, entity, source_uri, started, exc):
         pass  # never mask the original error
 
 
+def mark_task_failed(task_id: str, entity_prefix: str | None, batch_date: str, since, error: str) -> str:
+    """Make sure ops.load_audit has a 'failed' row for a task that failed in this
+    DAG run, and return its load_id (used by the DAG failure callback).
+
+    A failure inside stage_and_merge() already wrote that row (_record_failure);
+    reuse the newest one for this task's entity since the run started. A task
+    that failed before loading anything (missing file, API down, a data quality
+    check) gets a new row keyed on the task and batch date.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            if entity_prefix:
+                cur.execute(
+                    """SELECT load_id FROM ops.load_audit
+                       WHERE status = 'failed' AND LEFT(entity, LEN(%s)) = %s AND started_at >= %s
+                       ORDER BY started_at DESC LIMIT 1;""",
+                    (entity_prefix, entity_prefix, since),
+                )
+                row = cur.fetchone()
+                if row:
+                    return row[0]
+            load_id = load_id_for(task_id, batch_date)[:64]
+            cur.execute(
+                """INSERT INTO ops.load_audit (load_id, entity, source_uri, status, started_at, finished_at, details)
+                   VALUES (%s, %s, %s, 'failed', GETDATE(), GETDATE(), %s);""",
+                (load_id, task_id[:50], f"airflow:{task_id}", error[:2000]),
+            )
+        conn.commit()
+        return load_id
+    finally:
+        conn.close()
+
+
 def load_id_for(source: str, batch_date: str | date) -> str:
     # e.g. ("member_file-evergreen", "2026-09-28") -> "member_file-evergreen-2026-09-28".
     # Same inputs always give the same id, which is what makes reruns replace, not duplicate.

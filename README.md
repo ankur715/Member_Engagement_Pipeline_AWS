@@ -9,7 +9,9 @@ Vulnerability Index** combines claims, health risk assessments, NYC
 housing-violation data and NOAA weather alerts to flag which members need
 a wellness check before extreme heat or cold. And **LLM utilities** built
 on Claude through **Amazon Bedrock** tag CHW notes, explain data quality
-failures, and turn analysts' questions into safe SQL.
+failures, and turn analysts' questions into safe SQL. When a task or a
+data quality check fails, a **Pipeline Triage Agent** investigates with
+read-only tools and puts a suggested diagnosis in the failure email.
 
 Built on **S3 + IAM + Redshift Serverless**, with **pandas/SQL** pipelines,
 **Airflow** orchestration (replacing a legacy cron job), ingestion from
@@ -48,6 +50,8 @@ trial AWS account.
 
   Amazon Bedrock (Claude, us-east-1) <── LLM utilities: CHW note tagging, data quality
                                           triage notes, natural-language SQL over analytics.*
+  Amazon Bedrock (Nova Lite / Haiku)  <── Pipeline Triage Agent: on any task failure, read-only
+                                          tools over ops.* and S3 -> note in the failure email
 ```
 
 Orchestrated by Airflow (`airflow/dags/member_engagement_pipeline.py`):
@@ -88,6 +92,7 @@ Mapped against the [Healthcare Data Engineer posting](https://apply.workable.com
 | Healthcare data: claims, eligibility, HRAs | SCD2 eligibility rosters; claims with replacement/void versioning; HRA surveys |
 | Complex data integration | Vulnerability index joins claims, HRAs, CHW notes, ZIP-level housing data and county-level weather alerts |
 | Lightweight AI/LLM utilities: metadata extraction, SQL generation, anomaly explanation | [LLM utilities](#llm-utilities): Claude via Amazon Bedrock tags CHW notes, writes data quality triage notes, and answers questions with validated SQL |
+| Production support, root-cause analysis | [Pipeline Triage Agent](#pipeline-triage-agent): every failure gets a first-pass diagnosis from read-only evidence, for a person to approve |
 | AWS S3, IAM, Redshift | `infra/terraform/` |
 | Git, CI-friendly development | Feature branches, tagged releases, `.github/workflows/ci.yml` (unit tests, DAG tests, `terraform validate`) |
 
@@ -413,6 +418,158 @@ it at 40 notes, while the rules cover every note.
 
 ![LLM load audit](pics/llm_load_audit.jpg)
 
+## Pipeline Triage Agent
+
+When a task fails, someone has to work out why before anything can be
+fixed. The triage agent does that first pass. It reads the evidence the
+pipeline already records (the load audit, data quality results, staging
+and reject counts, the files that landed) and writes a diagnosis and a
+suggested fix. The note goes on the failed load's audit row and into the
+failure email. **A person reviews it and decides; the agent changes
+nothing.**
+
+```
+any task fails (after its retries), including data_quality on a failed error-level check
+        |
+        on_task_failure  (airflow/dags/alerting.py, the DAG's on_failure_callback)
+          1. ops.load_audit row marked 'failed'           (always first; reuses the row the load wrote)
+          2. triage_failed_load(load, task, batch, error)  (never raises; skipped if LLM_PROVIDER=none)
+               Bedrock Converse loop (boto3 bedrock-runtime, toolConfig), at most 8 model calls:
+                 model -> toolUse -> read-only tool -> toolResult -> model -> ... -> final text
+               triage_note, triage_model, triage_tokens -> ops.load_audit  (V016)
+          3. the existing SMTP failure email, now with the triage note
+        |
+        a person reads the note and approves or applies the fix
+```
+
+**How it's built:** a plain tool-use loop over the Amazon Bedrock Runtime
+**Converse API** ([`pipeline/triage/agent.py`](pipeline/triage/agent.py)).
+It uses no Bedrock Agents, AgentCore, Knowledge Bases, Lambda or any
+service outside this AWS account. Each step sends the conversation plus
+the six tool definitions. The model either asks for tools, which run
+locally and go back as `toolResult` blocks, or answers in fixed sections:
+`DIAGNOSIS`, `EVIDENCE`, `SUGGESTED FIX (needs human approval)` and
+`CONFIDENCE`. The system prompt describes the pipeline and its common
+failure patterns, for example "a check failing today but passing on
+previous days points to today's load".
+
+This goes further than the one-shot data quality note in
+[LLM utilities](#llm-utilities). That note summarizes failed checks; the
+agent investigates any failed task and decides what evidence to look at.
+
+**Tools** ([`pipeline/triage/tools.py`](pipeline/triage/tools.py)): fixed,
+read-only Python functions bound to the failed task and batch date, so the
+model can't pick another batch, table or query.
+
+| Tool | Reads | Redshift queries |
+|---|---|---|
+| `get_load_audit` | The failed load's audit row and every other load of the batch | 1 |
+| `get_dq_results` | Every check for the batch, plus the previous 7 days of the checks that failed | 1 |
+| `get_staging_counts` | Rows staged per staging table per load (`ops.v_triage_staging_counts`) | 1 |
+| `get_rejects` | `rejects/<source>/dt=<date>/` in S3: counts by reject reason, never the rows | 0 |
+| `get_file_history` | Recent loads of the source, plus the raw files that landed in S3 each day | 1 |
+| `get_pipeline_config` | A local registry of each DAG task: source, S3 folders, staging tables, merge procedure | 0 |
+
+So a whole investigation is **at most 4 small queries on one connection**,
+and the Serverless workgroup wakes once, usually already awake from the
+failing run. Results are cached per run, so a repeated tool call is free.
+
+**Guardrails:**
+- **Read-only, least privilege:**
+  - The tools connect as `triage_reader` (`python -m pipeline.triage.setup_reader`).
+    Its only role, `triage_reader_ro` (V017), has SELECT on exactly three
+    objects: `ops.load_audit`, `ops.dq_results` and
+    `ops.v_triage_staging_counts`.
+  - There is no free-form SQL. The connection wrapper runs only *named*
+    queries from a fixed dictionary, and a test checks that each one is a
+    single SELECT on those three objects.
+  - Writing the note back is a separate step, done by the ETL user.
+- **PHI-safe:**
+  - Staging tables hold names, phones and notes, so the agent can't read
+    them. It sees a view of row **counts** per load instead.
+  - Reject files are read for their `reject_reason` column only.
+  - Error messages and audit details are run through `phi.redact()`
+    (member IDs, phones, SSNs and emails removed; batch dates kept) before
+    they're sent, and the final note is redacted again.
+  - Bedrock keeps traffic in this AWS account, under the AWS BAA.
+- **Human approves fixes:** the agent has no tool that changes anything.
+  Its fix is text for a person to review before acting, for example asking
+  a plan to resend a file and then clearing the task.
+- **Bounded:**
+  - `TRIAGE_MAX_STEPS` (8 model calls); on the last one the model is told
+    to answer from the evidence it has.
+  - `TRIAGE_MAX_TOKENS` (40,000 input + output for the whole run).
+  - At most 1,500 output tokens per call, and each tool result is cut to
+    6,000 characters.
+  - Hitting a cap stops the loop and records its partial findings.
+- **Never masks the real failure:**
+  - The failed status is written first.
+  - Each callback step runs in its own `try/except`, and
+    `triage_failed_load()` never raises: Bedrock, tool and save errors are
+    logged.
+  - Airflow keeps reporting the task's own exception, and the email is
+    still sent without a note if triage fails. Tests make every step raise
+    and check that the callback still returns cleanly.
+- **Off by default:** with `LLM_PROVIDER=none`, the default and what CI
+  uses, the agent is skipped without a Bedrock client or Redshift
+  connection being created.
+
+**Models:**
+
+| `TRIAGE_MODEL` | Bedrock model | Use |
+|---|---|---|
+| `nova-lite` (default) | `us.amazon.nova-lite-v1:0` | Cheap Amazon model that does tool use reliably |
+| `claude-haiku` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Stronger reasoning for messier failures, about 15× the price |
+| any full id | as given | e.g. another inference profile |
+
+Terraform gives the pipeline user `bedrock:InvokeModel` on these two
+models' `us.*` inference profiles and the foundation models they route to,
+and nothing else in Bedrock (`triage_bedrock_models`).
+
+**Cost per run** (estimates; check current Bedrock pricing): a typical
+investigation is 3–5 model calls totalling about 10,000–20,000 input and
+1,000 output tokens. The conversation is re-sent each step, so input
+dominates.
+
+| Model | Price per 1M tokens (input / output, us-east-1 on-demand) | Typical run | Worst case at the 40k-token cap |
+|---|---|---|---|
+| Nova Lite | about $0.06 / $0.24 | **about $0.001** | under $0.01 |
+| Claude Haiku 4.5 | about $1 / $5 | **about $0.02** | about $0.06–0.20 |
+
+`triage_tokens` on each audit row records actual usage. The Redshift side
+is at most 4 small queries. Triage runs only when a task fails, not on
+every run.
+
+> **Billing check if you use Claude:** after a Claude run, open **Billing
+> and Cost Management → Bills** and confirm the charges appear under
+> **Amazon Bedrock**, not **AWS Marketplace**. On some accounts, Anthropic
+> models on Bedrock are billed through Marketplace, and promotional AWS
+> credits often don't cover Marketplace charges. Nova Lite is an Amazon
+> model, so it always bills under Amazon Bedrock. That's one reason it's
+> the default.
+
+**Setup** (once):
+
+```bash
+python -m pipeline.migrate               # V016: triage columns; V017: read-only role + staging-count view
+python -m pipeline.triage.setup_reader   # creates triage_reader (TRIAGE_REDSHIFT_PASSWORD in .env)
+cd infra/terraform && terraform apply    # Bedrock invoke permission for the two triage models
+```
+
+Then set `LLM_PROVIDER=bedrock` (and optionally `TRIAGE_MODEL=claude-haiku`)
+in `.env`. Failures are triaged automatically from then on. To run it by
+hand on a failed load:
+
+```bash
+python -m pipeline.triage.run load_claims-2026-10-02 --task load_claims           # print the diagnosis
+python -m pipeline.triage.run load_claims-2026-10-02 --task load_claims --write   # ...and save it
+```
+
+**Status:** built and unit-tested against a mocked Bedrock client (the
+tool loop, the step and token caps, the no-LLM skip, a data quality
+failure, PHI redaction and failure isolation). It hasn't been run live on
+Bedrock yet, and the Terraform policy hasn't been applied.
+
 ## Design decisions worth talking about
 
 **Redshift doesn't enforce keys, so idempotency lives in the load pattern.**
@@ -505,7 +662,8 @@ in parallel.
 | LLM drift (warn) | LLM and rule-based note tags agree on at least 70% of tags |
 
 Error-level failures fail the run, so KPIs are never published on bad data.
-The failure alert email includes each failed check and its observed value.
+The failure alert email includes each failed check and its observed value,
+plus the [triage agent's](#pipeline-triage-agent) note when an LLM is configured.
 The mock data deliberately triggers some of the compliance warnings, so
 expect to see them.
 
@@ -614,8 +772,8 @@ airflow standalone          # http://localhost:8080, unpause member_engagement_p
 ## Tests
 
 ```bash
-pytest -q tests                                   # 165 unit tests, no AWS, internet or LLM needed (moto, FastAPI TestClient, a fake Claude client)
-cd airflow && pytest -q tests                     # DAG integrity (needs the Airflow venv + env vars above)
+pytest -q tests                                   # 187 unit tests, no AWS, internet or LLM needed (moto, FastAPI TestClient, fake Claude and Bedrock clients)
+cd airflow && pytest -q tests                     # DAG integrity + the failure callback (needs the Airflow venv + env vars above)
 ```
 
 The tests cover roster normalization for both plan layouts, SCD2 change
@@ -625,7 +783,9 @@ normalization, Socrata paging and HPD cleanup, NWS alert parsing and
 county mapping, the Parquet ↔ DDL contract, transaction shape and rollback
 for loads, migration checksums, KPI upserts, and the LLM utilities (client
 settings, refusals, redaction, batching, SQL validation) against a fake
-Claude client. CI runs the unit tests, the
+Claude client, and the triage agent (tool loop, caps, read-only named
+queries, PHI-safe tool output, failure isolation) against a mocked Bedrock
+client. CI runs the unit tests, the
 DAG tests, and `terraform validate` on every push.
 
 **Verified on live AWS.** `terraform apply` built all 15 resources, and
@@ -652,6 +812,10 @@ couldn't (the LLM fixes are listed under [LLM utilities](#llm-utilities)):
   eligible on Bedrock (one `.env` line); build a small hand-labeled set of
   varied notes to measure the LLM tagger properly; use the Message Batches
   API for bulk re-tagging at lower cost.
+- **Triage agent next steps.** A first live run on Bedrock with Nova Lite
+  and Haiku on a few staged failures (missing file, schema change, DQ
+  failure) to compare diagnoses; a small set of past incidents with known
+  causes to score it.
 - **Production hardening.** Secrets Manager instead of `.env`, a
   VPC-private Redshift workgroup with Airflow on MWAA or ECS, and AWS
   Transfer Family for health-plan SFTP drops.
@@ -660,18 +824,19 @@ couldn't (the LLM fixes are listed under [LLM utilities](#llm-utilities)):
 
 ```
 infra/terraform/     S3 lake, IAM (least privilege), Redshift Serverless, usage limit, budget
-sql/redshift/        V001-V015 versioned migrations (schemas, tables, staging, ops/SLAs, procedures, views, RBAC,
-                     claims, HRA, housing violations, weather alerts, vulnerability index, LLM agreement)
+sql/redshift/        V001-V017 versioned migrations (schemas, tables, staging, ops/SLAs, procedures, views, RBAC,
+                     claims, HRA, housing violations, weather alerts, vulnerability index, LLM agreement, triage)
 pipeline/            config, s3_io, redshift, loaders (Parquet->COPY->MERGE), schemas, phi, migrate, watermarks, http
   sources/           simulators: health-plan rosters, claims extracts, HRA survey exports
   ingest/            member_files, salesforce_activities, events, contact_preferences,
                      claims, hra, housing_violations, weather_alerts
   enrich/            sdoh_rules, sdoh_llm (LLM note tagging)
   ai/                llm (Claude via Bedrock or the Claude API), ask (natural-language SQL)
+  triage/            Pipeline Triage Agent: agent (Converse loop), tools, readonly (named queries), run, setup_reader
   quality/           data_quality
   publish/           plan_kpis (Google Sheets + S3 export)
 mock_api/            Salesforce / events / Google Sheets / NYC Open Data / NWS stand-ins (FastAPI)
-airflow/             DAG, failure alerting, DAG tests
+airflow/             DAG, failure callback (mark failed -> triage -> email), DAG tests
 legacy/              the cron setup the DAG replaces
 tests/               unit tests
 ```

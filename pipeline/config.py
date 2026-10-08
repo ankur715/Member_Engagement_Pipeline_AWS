@@ -53,6 +53,16 @@ LLM_MAX_NOTES_PER_RUN = int(os.environ.get("LLM_MAX_NOTES_PER_RUN", "100"))  # c
 # notes may only go to a BAA-covered endpoint (Bedrock), never the direct API.
 SYNTHETIC_DATA = os.environ.get("SYNTHETIC_DATA", "true").strip().lower() in ("1", "true", "yes")
 
+# --- Pipeline Triage Agent (pipeline/triage/): investigates failed tasks / DQ checks.
+#     Runs whenever LLM_PROVIDER is not "none", always on Bedrock (Converse API).
+#     nova-lite (default, Amazon model) | claude-haiku | any full Bedrock model id / inference profile
+TRIAGE_MODEL = os.environ.get("TRIAGE_MODEL", "nova-lite").strip()
+TRIAGE_MAX_STEPS = int(os.environ.get("TRIAGE_MAX_STEPS", "8"))           # model calls per run
+TRIAGE_MAX_TOKENS = int(os.environ.get("TRIAGE_MAX_TOKENS", "40000"))     # input + output tokens per run
+# Read-only Redshift user for the agent's tools (python -m pipeline.triage.setup_reader).
+TRIAGE_REDSHIFT_USER = os.environ.get("TRIAGE_REDSHIFT_USER", "triage_reader")
+TRIAGE_REDSHIFT_PASSWORD = os.environ.get("TRIAGE_REDSHIFT_PASSWORD", "")   # never has a default
+
 # --- Real Salesforce (optional). If SF_USERNAME is blank, the mock is used. ---
 SF_USERNAME = os.environ.get("SF_USERNAME", "")
 SF_PASSWORD = os.environ.get("SF_PASSWORD", "")
