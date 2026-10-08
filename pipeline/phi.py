@@ -34,8 +34,12 @@ def member_token(member_id: str, key: str | None = None) -> str:
     return hmac.new(key.encode(), member_id.encode(), hashlib.sha256).hexdigest()
 
 
-def redact(text: str) -> str:
+def redact(text: str, keep_dates: bool = False) -> str:
     # Run every pattern over the text, replacing matches with a placeholder.
+    # keep_dates=True is for pipeline metadata (error messages, load ids), where
+    # dates are batch dates the triage agent needs, not dates about a person.
     for pattern, replacement in _PATTERNS:
+        if keep_dates and replacement == "[DATE]":
+            continue
         text = pattern.sub(replacement, text)
     return text
