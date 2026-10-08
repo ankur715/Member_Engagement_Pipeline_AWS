@@ -16,7 +16,8 @@ import alerting  # noqa: E402
 
 
 def context():
-    return {"ti": SimpleNamespace(task_id="load_claims", dag_id="member_engagement_pipeline", run_id="r1"),
+    return {"ti": SimpleNamespace(task_id="load_claims", dag_id="member_engagement_pipeline", run_id="r1",
+                                  start_date=datetime(2026, 10, 2, 6, 30, tzinfo=timezone.utc)),
             "ds": "2026-10-02",
             "exception": FileNotFoundError("No claims files for 2026-10-02 -- health-plan drop missing?"),
             "dag_run": SimpleNamespace(start_date=datetime(2026, 10, 2, 6, 0, tzinfo=timezone.utc))}
@@ -47,7 +48,8 @@ def test_marks_failed_then_triages_then_emails_with_the_note(monkeypatch, rec):
     def mark(task_id, prefix, batch_date, since, error):
         rec.calls.append("mark")
         assert (task_id, prefix, batch_date) == ("load_claims", "claims_", "2026-10-02")
-        assert since == datetime(2026, 10, 2, 6, 0) and error.startswith("FileNotFoundError")
+        assert since == datetime(2026, 10, 2, 6, 30)            # this attempt's start, not the DAG run's
+        assert error.startswith("FileNotFoundError")
         return "load_claims-2026-10-02"
 
     def triage(load_id, task_id, batch_date, error):

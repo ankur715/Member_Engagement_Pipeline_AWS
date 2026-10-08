@@ -69,9 +69,12 @@ def _error_text(context) -> str:
     return f"{type(exc).__name__}: {exc}" if exc is not None else "unknown error"
 
 
-def _run_started_at(context):
-    # Audit timestamps are naive UTC; the DAG run's start bounds "this run's" failed rows.
-    start = getattr(context.get("dag_run"), "start_date", None)
+def _attempt_started_at(context):
+    # Only a failed audit row written by THIS attempt counts as "the load that
+    # just failed" -- not one left by an earlier attempt or an earlier run of the
+    # same DAG run (found live: a rerun reused a stale row with an old error).
+    # Audit timestamps are naive UTC. Falls back to the DAG run's start.
+    start = getattr(context.get("ti"), "start_date", None) or getattr(context.get("dag_run"), "start_date", None)
     if start is None:
         return None
     return start.astimezone(timezone.utc).replace(tzinfo=None) if start.tzinfo else start
@@ -87,7 +90,7 @@ def on_task_failure(context) -> None:
     try:
         from pipeline.loaders import mark_task_failed
         from pipeline.triage.tools import TASKS
-        since = _run_started_at(context)
+        since = _attempt_started_at(context)
         prefix = TASKS.get(ti.task_id, {}).get("entity_prefix") if since else None
         load_id = mark_task_failed(ti.task_id, prefix, batch_date, since, error)
     except Exception:
