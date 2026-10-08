@@ -33,7 +33,7 @@ for _path in (_DAGS_DIR, os.path.abspath(os.path.join(_DAGS_DIR, "..", ".."))):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
-from alerting import failure_email_notifier  # noqa: E402
+from alerting import on_task_failure  # noqa: E402
 
 # Airflow pool with 1 slot (create it: `airflow pools set redshift 1 ...`) so only
 # one task writes to Redshift at a time.
@@ -45,7 +45,8 @@ default_args = {
     "retry_delay": timedelta(minutes=2),             # first retry after 2 min...
     "retry_exponential_backoff": True,               # ...then longer waits each time
     "execution_timeout": timedelta(minutes=20),      # kill a task that hangs
-    "on_failure_callback": failure_email_notifier,   # email once retries are exhausted
+    # Once retries are exhausted: mark the load failed, run the triage agent, email (alerting.py).
+    "on_failure_callback": on_task_failure,
 }
 
 

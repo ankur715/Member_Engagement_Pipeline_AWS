@@ -44,3 +44,14 @@ def test_dq_waits_for_every_source(dag):
 
 def test_kpis_publish_only_after_dq(dag):
     assert dag.get_task("publish_plan_kpis").upstream_task_ids == {"data_quality"}
+
+
+def test_failure_callback_runs_triage_then_email(dag):
+    from alerting import on_task_failure
+    assert dag.default_args["on_failure_callback"] is on_task_failure
+
+
+def test_every_task_is_in_the_triage_registry(dag):
+    # The triage agent's get_pipeline_config tool describes each task; a new task must be added there.
+    from pipeline.triage.tools import TASKS
+    assert set(dag.task_ids) == set(TASKS)
