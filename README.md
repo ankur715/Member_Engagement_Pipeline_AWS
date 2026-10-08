@@ -1,4 +1,4 @@
-# Member Engagement Data Pipeline (AWS)
+# Member Engagement Data Pipeline (AWS) with LLM Utilities and a Pipeline Triage Agent
 
 A production-style data platform for a **community health worker (CHW)
 program** serving health-plan members. The program's customers are health
