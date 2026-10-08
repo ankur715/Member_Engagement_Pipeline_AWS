@@ -56,3 +56,12 @@ variable "alert_email" {
   description = "Where budget alerts go."
   type        = string
 }
+
+variable "triage_bedrock_models" {
+  description = "Bedrock model ids the triage agent may invoke through us.* inference profiles."
+  type        = list(string)
+  default = [
+    "amazon.nova-lite-v1:0",                    # TRIAGE_MODEL=nova-lite (default)
+    "anthropic.claude-haiku-4-5-20251001-v1:0", # TRIAGE_MODEL=claude-haiku
+  ]
+}

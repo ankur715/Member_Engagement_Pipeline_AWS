@@ -187,6 +187,34 @@ resource "aws_iam_user_policy" "pipeline" {
 }
 
 # ---------------------------------------------------------------------------
+# Pipeline Triage Agent (pipeline/triage/) on Amazon Bedrock: the pipeline
+# user, which Airflow runs as, may invoke only the listed models' us.*
+# inference profiles and the foundation models they route to -- nothing else
+# in Bedrock (no Agents, Knowledge Bases or model management). Converse calls
+# are authorized as bedrock:InvokeModel.
+# ---------------------------------------------------------------------------
+
+resource "aws_iam_user_policy" "triage_bedrock" {
+  name = "triage-bedrock-invoke"
+  user = aws_iam_user.pipeline.name
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = ["bedrock:InvokeModel"]
+      Resource = flatten([
+        for model in var.triage_bedrock_models : [
+          # the cross-region inference profile in this account...
+          "arn:aws:bedrock:${var.region}:${data.aws_caller_identity.current.account_id}:inference-profile/us.${model}",
+          # ...and the foundation model in each US region the profile routes to
+          "arn:aws:bedrock:*::foundation-model/${model}",
+        ]
+      ])
+    }]
+  })
+}
+
+# ---------------------------------------------------------------------------
 # Redshift Serverless -- bills per RPU-second only while queries run, and
 # pauses when idle. The usage limit below is the hard cost stop.
 # ---------------------------------------------------------------------------
