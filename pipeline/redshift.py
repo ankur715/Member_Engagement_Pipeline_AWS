@@ -8,18 +8,19 @@ import psycopg2
 from pipeline import config
 
 
-def get_connection(attempts: int = 4):
+def get_connection(attempts: int = 4, user: str | None = None, password: str | None = None):
     # connect_timeout is generous because a paused Serverless workgroup takes
     # a few seconds to resume on the first query of the day. Transient network
     # drops are retried with backoff (5s, 10s, 20s) before giving up.
+    # user/password default to the ETL user; the triage agent passes its read-only user.
     for attempt in range(1, attempts + 1):
         try:
             return psycopg2.connect(
                 host=config.REDSHIFT_HOST,
                 port=config.REDSHIFT_PORT,
                 dbname=config.REDSHIFT_DB,
-                user=config.REDSHIFT_USER,
-                password=config.REDSHIFT_PASSWORD,
+                user=user or config.REDSHIFT_USER,
+                password=password or config.REDSHIFT_PASSWORD,
                 sslmode="require",   # encrypted in transit -- PHI never crosses the wire in clear text
                 connect_timeout=30,  # seconds to wait for the TCP/SSL handshake
             )

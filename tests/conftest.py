@@ -17,6 +17,11 @@ os.environ.update({
     "LLM_EFFORT": "low",
     "LLM_MAX_NOTES_PER_RUN": "100",
     "SYNTHETIC_DATA": "true",
+    "TRIAGE_MODEL": "nova-lite",
+    "TRIAGE_MAX_STEPS": "8",
+    "TRIAGE_MAX_TOKENS": "40000",
+    "TRIAGE_REDSHIFT_USER": "triage_reader",
+    "TRIAGE_REDSHIFT_PASSWORD": "",
 })
 os.environ.pop("AWS_PROFILE", None)
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
