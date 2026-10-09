@@ -111,6 +111,15 @@ CHECKS = [
                 AND e.activity_date > c.requested_date""",
           lambda v: v == 0, "Completed phone outreach dated after the member opted out"),
 
+    # --- rejects: a partner changing its layout or formats shows up as a spike in
+    #     rejected rows; the load itself still "succeeds" with whatever rows parsed ---
+    Check("load_reject_rate_pct", "error",
+          # Highest reject rate of any load in this batch. Files under 20 rows are
+          # skipped (one bad row in a 3-row daily file isn't a spike).
+          """SELECT COALESCE(MAX(100.0 * rows_rejected / NULLIF(rows_in, 0)), 0) FROM ops.load_audit
+             WHERE status = 'succeeded' AND rows_in >= 20 AND POSITION(%(batch_date)s IN load_id) > 0""",
+          lambda v: v <= 20, "Highest % of rows rejected by any load of this batch (20%+ = likely a partner layout/format change)"),
+
     # --- claims ---
     Check("claim_files_loaded", "error",
           """SELECT COUNT(DISTINCT entity) FROM ops.load_audit

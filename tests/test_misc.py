@@ -52,3 +52,11 @@ def test_kpi_sheet_upsert_replaces_month_row():
     assert rows == [header, ["P", "2026-09-01", "2"]] and replaced
     rows, _ = plan_kpis.upsert_rows(rows, header, ["P", "2026-10-01", "3"])
     assert len(rows) == 3
+
+
+def test_reject_rate_check_flags_a_spike_but_not_normal_noise():
+    check = next(c for c in data_quality.CHECKS if c.name == "load_reject_rate_pct")
+    assert check.severity == "error"
+    assert data_quality.evaluate(check, 5.1)["passed"]          # normal: ~5% of a history file
+    assert not data_quality.evaluate(check, 64.0)["passed"]     # a partner format change
+    assert "rows_in >= 20" in check.sql                          # tiny daily files can't trip it
