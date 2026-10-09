@@ -83,7 +83,7 @@ Mapped against the [Healthcare Data Engineer posting](https://apply.workable.com
 | Performant Redshift SQL: DDL, DML, stored procedures | `sql/redshift/V002`–`V013`: dist/sort keys, `MERGE`, SCD2, latest-version claim merges, snapshot replaces |
 | Manage schemas, views, permissions, table evolution safely | Checksummed migration runner (`pipeline/migrate.py`), fix-forward migrations, RBAC roles, dynamic data masking |
 | Debug production data issues | `ops.load_audit` (every load's source, rows in/staged/rejected, failures), raw payloads kept in S3 for replay |
-| Data quality, freshness, lineage, observability | 26 checks → `ops.dq_results`; per-source SLAs → `ops.v_sla_status`; `source_file`/`source_uri` lineage |
+| Data quality, freshness, lineage, observability | 27 checks → `ops.dq_results`; per-source SLAs → `ops.v_sla_status`; `source_file`/`source_uri` lineage |
 | PHI/PII safeguards | HMAC member tokens, de-identified analytics (enforced by a DQ check on the column catalog), masking, TLS-only encrypted bucket, least-privilege IAM, no PHI in logs |
 | Migrate cron → orchestration | `legacy/crontab` + `legacy/run_nightly.sh` (before) → the DAG (after); see [Cron → Airflow](#cron--airflow) |
 | Idempotent, retry-safe jobs | Every load is one Redshift transaction; natural-key merges; watermarks advance in the same transaction |
@@ -589,6 +589,20 @@ python -m pipeline.triage.run load_claims-2026-10-02 --task load_claims --write 
     rejects for all three missing sources, plus the pipeline config.
   - **Diagnosis:** files weren't delivered for those sources. It took 3
     steps, 11,865 tokens and 4 Redshift queries, about **$0.001**.
+- **A real rejects spike:** Harbor's claims export was changed to write
+  service dates as Excel serial numbers (`45921`), a common partner file
+  change. The load "succeeded" with **950 of 950 rows rejected**; before
+  the new `load_reject_rate_pct` check, nothing would have failed.
+  - **The check:** failed at 100%, and the callback ran the agent.
+  - **The agent's investigation:** it read the load audit and the DQ
+    results, then the claims rejects.
+  - **Its diagnosis:** it named the exact load,
+    `claims_harbor_history_20261009`, and the reason (950 ×
+    `invalid_service_date`), with high confidence. That took 3 steps and
+    10,936 tokens, about $0.001.
+  - **Where it fell short:** its suggested fix was generic, and it didn't
+    compare Harbor with Evergreen's normal 43 of 953. The note is a
+    starting point, not the answer.
 - **What the live runs caught** that unit tests couldn't. Each was fixed
   with a regression test:
   - The staging-count view needed USAGE on the `staging` schema (fixed
@@ -702,7 +716,7 @@ in parallel.
 
 ## Data quality & SLAs
 
-`pipeline/quality/data_quality.py` runs 26 checks after every load and writes each result to `ops.dq_results`. When checks fail and an LLM is configured, a short triage note is added (see [LLM utilities](#llm-utilities)).
+`pipeline/quality/data_quality.py` runs 27 checks after every load and writes each result to `ops.dq_results`. When checks fail and an LLM is configured, a short triage note is added (see [LLM utilities](#llm-utilities)).
 
 | Kind | Checks |
 |---|---|
@@ -717,6 +731,7 @@ in parallel.
 | HRA | vendor file loaded (error) · unknown members · ≥50% of members surveyed in 12 months |
 | Public data (warn) | housing violations present · weather pulled today · alert counties all mapped to FIPS |
 | Vulnerability index (error) | every active member scored once · no phone opt-outs on the wellness queue · no identifiers in `analytics.*` |
+| Rejects (error) | no load of the batch rejects more than 20% of its rows (files of 20+ rows): a partner layout or format change otherwise loads silently with whatever rows parsed |
 | LLM drift (warn) | LLM and rule-based note tags agree on at least 70% of tags |
 
 Error-level failures fail the run, so KPIs are never published on bad data.
