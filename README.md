@@ -594,15 +594,23 @@ python -m pipeline.triage.run load_claims-2026-10-02 --task load_claims --write 
   change. The load "succeeded" with **950 of 950 rows rejected**; before
   the new `load_reject_rate_pct` check, nothing would have failed.
   - **The check:** failed at 100%, and the callback ran the agent.
-  - **The agent's investigation:** it read the load audit and the DQ
-    results, then the claims rejects.
-  - **Its diagnosis:** it named the exact load,
+  - **Its diagnosis:** both runs named the exact load,
     `claims_harbor_history_20261009`, and the reason (950 ×
-    `invalid_service_date`), with high confidence. That took 3 steps and
-    10,936 tokens, about $0.001.
-  - **Where it fell short:** its suggested fix was generic, and it didn't
-    compare Harbor with Evergreen's normal 43 of 953. The note is a
-    starting point, not the answer.
+    `invalid_service_date`), with high confidence. Each took 3 steps and
+    about 11,000 tokens, roughly $0.001.
+  - **It corrected its own mistake:** on the second run, it first called
+    `get_rejects` and `get_file_history` without a source. The tools
+    returned "pass a source", and it retried with `source: "claims"`.
+    Bad tool calls go back to the model as errors instead of crashing the
+    run.
+  - **Where it fell short:**
+    - Its suggested fix was "update the Redshift schema", but the real
+      fix is in the claims date parser, or in asking Harbor to revert its
+      format.
+    - It didn't compare Harbor with Evergreen's normal 43 of 953.
+
+    That's why every note says fixes need human approval: the agent finds
+    the right file and reason fast, and a person decides the fix.
 - **What the live runs caught** that unit tests couldn't. Each was fixed
   with a regression test:
   - The staging-count view needed USAGE on the `staging` schema (fixed
@@ -641,6 +649,15 @@ that no checks had run and diagnosed the missing module, using two tools.
 tokens used for each failed load.
 
 ![Triage notes in the load audit](pics/triage_audit_note.jpg)
+
+**A rejects spike, caught by `load_reject_rate_pct`.** Harbor's claims
+file arrived with Excel-serial dates, so 950 of 950 rows were rejected
+while the load still "succeeded". The email has the failed check, the
+DQ module's note, and the agent's diagnosis. The diagnosis gets the file
+and reason right, but suggests the wrong fix (a schema change), which is
+exactly what the human review step is for.
+
+![Triage of a rejects spike](pics/triage_rejects_spike_email.jpg)
 
 ## Design decisions worth talking about
 
