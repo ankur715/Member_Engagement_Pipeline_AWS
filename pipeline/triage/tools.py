@@ -8,9 +8,10 @@ choose another batch, a table or a query, and nothing here writes anything.
     get_staging_counts    ops.v_triage_staging_counts (counts per load)         1
     get_rejects           S3 rejects/<source>/dt=<date>/: counts by reason      0
     get_file_history      ops.load_audit history + S3 raw/ file listing         1
+    get_watermarks        ops.watermarks: incremental-pull high-water marks     1
     get_pipeline_config   the local task/source registry below                  0
 
-A whole investigation is at most 4 small queries on one connection. Results
+A whole investigation is at most 5 small queries on one connection. Results
 are COUNTS and IDs only: reject files are read for their reject_reason column
 alone, error text is run through phi.redact() (keeping batch dates), and no
 tool returns a row of member data.
@@ -19,13 +20,14 @@ import csv
 import io
 import json
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from pipeline import phi, s3_io
 from pipeline.reference_data import HEALTH_PLANS
 from pipeline.triage.readonly import ReadOnlySession
 
 MAX_RESULT_CHARS = 6000   # each tool result is truncated to this before it goes to the model
+STUCK_AFTER_HOURS = 26    # a daily pipeline should advance a watermark at least this often
 
 # S3 folders under raw/ and rejects/ (one per source).
 SOURCES = ("member_files", "salesforce_activities", "events_api", "contact_preferences",
@@ -45,9 +47,10 @@ TASKS = {
                           "staging_tables": ["member_eligibility"], "merge_procedure": "core.sp_merge_member_eligibility"},
     "ingest_salesforce_activities": {"kind": "Salesforce API pull, incremental on a LastModifiedDate watermark",
                                      "source": "salesforce_activities", "entity_prefix": "salesforce_activities",
+                                     "watermark": "salesforce_activities",
                                      "staging_tables": ["engagements"], "merge_procedure": "core.sp_merge_engagements"},
-    "ingest_events": {"kind": "community events REST API (events with nested attendees)", "source": "events_api",
-                      "entity_prefix": "events_api", "staging_tables": ["events", "event_attendance"],
+    "ingest_events": {"kind": "community events REST API (events with nested attendees), incremental on updated_at",
+                      "source": "events_api", "entity_prefix": "events_api", "watermark": "events_api", "staging_tables": ["events", "event_attendance"],
                       "merge_procedure": "core.sp_merge_events"},
     "ingest_contact_preferences": {"kind": "do-not-contact Google Sheet, full snapshot (an empty sheet fails the load)",
                                    "source": "contact_preferences", "entity_prefix": "contact_preferences",
@@ -107,6 +110,11 @@ TOOL_SPECS = [
      "inputSchema": {"json": {"type": "object", "properties": {
          **_SOURCE_PARAM,
          "days": {"type": "integer", "description": "Days of S3 history (1-7).", "minimum": 1, "maximum": 7}}}}},
+    {"name": "get_watermarks",
+     "description": "High-water marks of the incremental API pulls (Salesforce activities, events): the newest "
+                    "record timestamp loaded and when it last advanced. A watermark that stopped advancing means "
+                    "a stuck incremental pull (expired token, failed loads, an API returning nothing new).",
+     "inputSchema": {"json": {"type": "object", "properties": {}}}},
     {"name": "get_pipeline_config",
      "description": "What the failed task does: source type, S3 folders, staging tables, merge procedure, "
                     "expected loads per batch, schedule and retries.",
@@ -210,6 +218,28 @@ class Toolbox:
             keys = s3_io.list_keys(f"raw/{source}/dt={d}/")
             landed[d] = {"files": len(keys), "names": [k.rsplit("/", 1)[-1] for k in keys[:10]]}
         return {"source": source, "recent_loads": loads, "raw_files_by_date": landed}
+
+    def get_watermarks(self) -> dict:
+        rows = self.session.query("watermarks")
+        now = datetime.now(timezone.utc).replace(tzinfo=None)     # audit/watermark times are naive UTC
+        batch = date.fromisoformat(self.target.batch_date)
+        out, findings = [], []
+        for r in rows:
+            advanced = datetime.fromisoformat(r["updated_at"])
+            hours = round((now - advanced).total_seconds() / 3600, 1)
+            behind = (batch - datetime.fromisoformat(r["watermark_ts"]).date()).days
+            task = next((t for t, cfg in TASKS.items() if cfg.get("watermark") == r["source"]), None)
+            out.append({**r, "task": task, "hours_since_advanced": hours, "days_behind_batch_date": behind})
+            if hours > STUCK_AFTER_HOURS:
+                # Spelled out, so a small model can't misread the raw timestamps.
+                findings.append(f"{r['source']}: last advanced {hours} h ago, newest record loaded is "
+                                f"{behind} day(s) before the batch date -- the incremental pull may be stuck")
+        return {"findings": findings or ["every watermark advanced within the last "
+                                         f"{STUCK_AFTER_HOURS} h"],
+                "meaning": "a stuck watermark means the pull isn't landing new records: check that source's "
+                           "recent loads (get_file_history) for failures or rows_in = 0. No activity at the "
+                           "source (e.g. a holiday) can also hold it still." if findings else "",
+                "watermarks": out}
 
     def get_pipeline_config(self) -> dict:
         return {"task_id": self.target.task_id, **_COMMON, **self._task,

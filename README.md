@@ -446,7 +446,7 @@ any task fails (after its retries), including data_quality on a failed error-lev
 **Converse API** ([`pipeline/triage/agent.py`](pipeline/triage/agent.py)).
 It uses no Bedrock Agents, AgentCore, Knowledge Bases, Lambda or any
 service outside this AWS account. Each step sends the conversation plus
-the six tool definitions. The model either asks for tools, which run
+the seven tool definitions. The model either asks for tools, which run
 locally and go back as `toolResult` blocks, or answers in fixed sections:
 `DIAGNOSIS`, `EVIDENCE`, `SUGGESTED FIX (needs human approval)` and
 `CONFIDENCE`. The system prompt describes the pipeline and its common
@@ -468,24 +468,26 @@ model can't pick another batch, table or query.
 | `get_staging_counts` | Rows staged per staging table per load (`ops.v_triage_staging_counts`) | 1 |
 | `get_rejects` | `rejects/<source>/dt=<date>/` in S3: counts by reject reason, never the rows | 0 |
 | `get_file_history` | Recent loads of the source, plus the raw files that landed in S3 each day | 1 |
+| `get_watermarks` | The incremental-pull high-water marks (Salesforce, events): hours since each last advanced and days behind the batch date, with any watermark idle for more than 26 h flagged as a possibly stuck pull | 1 |
 | `get_pipeline_config` | A local registry of each DAG task: source, S3 folders, staging tables, merge procedure | 0 |
 
-So a whole investigation is **at most 4 small queries on one connection**,
+So a whole investigation is **at most 5 small queries on one connection**,
 and the Serverless workgroup wakes once, usually already awake from the
 failing run. Results are cached per run, so a repeated tool call is free.
 
 **Guardrails:**
 - **Read-only, least privilege:**
   - The tools connect as `triage_reader` (`python -m pipeline.triage.setup_reader`).
-    Its only role, `triage_reader_ro` (V017), has SELECT on exactly three
-    objects: `ops.load_audit`, `ops.dq_results` and
-    `ops.v_triage_staging_counts`. It also has USAGE on the `staging`
+    Its only role, `triage_reader_ro` (V017), has SELECT on exactly four
+    objects: `ops.load_audit`, `ops.dq_results`,
+    `ops.v_triage_staging_counts` and `ops.watermarks` (V019; source names
+    and timestamps only). It also has USAGE on the `staging`
     schema, which Redshift requires for that view (V018), but no SELECT on
     any staging table. That was verified live: reading any PHI table or
     writing anything is denied.
   - There is no free-form SQL. The connection wrapper runs only *named*
     queries from a fixed dictionary, and a test checks that each one is a
-    single SELECT on those three objects.
+    single SELECT on those four objects.
   - Writing the note back is a separate step, done by the ETL user.
 - **PHI-safe:**
   - Staging tables hold names, phones and notes, so the agent can't read
@@ -540,7 +542,7 @@ dominates.
 | Claude Haiku 4.5 | about $1 / $5 | **about $0.02** | about $0.06–0.20 |
 
 `triage_tokens` on each audit row records actual usage. The Redshift side
-is at most 4 small queries. Triage runs only when a task fails, not on
+is at most 5 small queries. Triage runs only when a task fails, not on
 every run.
 
 > **Billing check if you use Claude:** after a Claude run, open **Billing
@@ -554,7 +556,7 @@ every run.
 **Setup** (once):
 
 ```bash
-python -m pipeline.migrate               # V016: triage columns; V017-V018: read-only role + staging-count view
+python -m pipeline.migrate               # V016: triage columns; V017-V019: read-only role, staging-count view, watermarks
 python -m pipeline.triage.setup_reader   # creates triage_reader (TRIAGE_REDSHIFT_PASSWORD in .env)
 cd infra/terraform && terraform apply    # Bedrock invoke permission for the two triage models
 ```
@@ -571,7 +573,7 @@ python -m pipeline.triage.run load_claims-2026-10-02 --task load_claims --write 
 **Verified live:**
 - **Setup:** migrations V016–V018 applied, `triage_reader` created, and
   the Terraform policy applied.
-- **Least privilege:** as `triage_reader`, the three ops objects are
+- **Least privilege:** as `triage_reader`, the four ops objects are
   readable, while every staging, core, care and analytics table is denied,
   and so are writes. The IAM policy simulator allows `InvokeModel` only on
   the two triage models, and denies other models, Bedrock Agents and
@@ -611,6 +613,12 @@ python -m pipeline.triage.run load_claims-2026-10-02 --task load_claims --write 
 
     That's why every note says fixes need human approval: the agent finds
     the right file and reason fast, and a person decides the fix.
+- **A stuck incremental pull:** the Salesforce API was unreachable, so
+  `ingest_salesforce_activities` failed with a `ConnectionError`. The
+  agent read the audit and the file history, then called `get_watermarks`.
+  It cited that the Salesforce watermark hadn't advanced in 169.7 hours,
+  and diagnosed a stuck pull caused by the API connection, with high
+  confidence. That took 3 steps, 9,878 tokens and 3 Redshift queries.
 - **What the live runs caught** that unit tests couldn't. Each was fixed
   with a regression test:
   - The staging-count view needed USAGE on the `staging` schema (fixed
@@ -862,7 +870,7 @@ airflow standalone          # http://localhost:8080, unpause member_engagement_p
 ## Tests
 
 ```bash
-pytest -q tests                                   # 188 unit tests, no AWS, internet or LLM needed (moto, FastAPI TestClient, fake Claude and Bedrock clients)
+pytest -q tests                                   # 192 unit tests, no AWS, internet or LLM needed (moto, FastAPI TestClient, fake Claude and Bedrock clients)
 cd airflow && pytest -q tests                     # DAG integrity + the failure callback (needs the Airflow venv + env vars above)
 ```
 
@@ -914,7 +922,7 @@ couldn't (the LLM fixes are listed under [LLM utilities](#llm-utilities)):
 
 ```
 infra/terraform/     S3 lake, IAM (least privilege), Redshift Serverless, usage limit, budget
-sql/redshift/        V001-V018 versioned migrations (schemas, tables, staging, ops/SLAs, procedures, views, RBAC,
+sql/redshift/        V001-V019 versioned migrations (schemas, tables, staging, ops/SLAs, procedures, views, RBAC,
                      claims, HRA, housing violations, weather alerts, vulnerability index, LLM agreement, triage)
 pipeline/            config, s3_io, redshift, loaders (Parquet->COPY->MERGE), schemas, phi, migrate, watermarks, http
   sources/           simulators: health-plan rosters, claims extracts, HRA survey exports

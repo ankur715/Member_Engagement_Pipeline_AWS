@@ -59,6 +59,8 @@ Common causes:
 - Many rejects (load_reject_rate_pct fails): a partner changed its file layout or formats. Compare the
   reject reasons, the plans/files, and the source's previous loads to find which file changed and how.
 - Rows in much lower than usual: an API pull stopped early (paging, expired token, rate limit 429, 5xx).
+- Incremental pulls (Salesforce, events) use watermarks: get_watermarks shows if one stopped advancing,
+  which means new records aren't landing even if each load "succeeds" with few or no rows.
 - COPY / merge errors: the Parquet schema no longer matches the staging table (a column added or renamed).
 - Redshift: usage limit reached, serializable isolation conflict (error 1023, concurrent writers),
   connection or statement timeouts.
