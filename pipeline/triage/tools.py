@@ -151,8 +151,18 @@ class Toolbox:
         rows = self.session.query("batch_loads", load_id=self.target.load_id, batch_date=self.target.batch_date)
         rows = [{k: _redact(v) for k, v in r.items()} for r in rows]
         failed = [r for r in rows if r["load_id"] == self.target.load_id]
+        # Other loads: the latest row per load_id (reruns add a row each time) with an
+        # attempt count, and counts only (their error text stays in their own rows),
+        # so a busy batch date still fits in one tool result.
+        latest: dict[str, dict] = {}
+        for r in rows:                                   # ordered by started_at, so the last one wins
+            if r["load_id"] != self.target.load_id:
+                attempts = latest.get(r["load_id"], {}).get("attempts", 0) + 1
+                latest[r["load_id"]] = {**{k: v for k, v in r.items() if k not in ("details", "finished_at")},
+                                        "attempts": attempts}
+        others = list(latest.values())
         return {"failed_load": failed[-1] if failed else {"error": f"no audit row for {self.target.load_id}"},
-                "batch_loads": [r for r in rows if r["load_id"] != self.target.load_id]}
+                "batch_loads": others}
 
     def get_dq_results(self) -> dict:
         from pipeline.quality.data_quality import CHECKS

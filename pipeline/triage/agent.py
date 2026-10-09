@@ -56,7 +56,8 @@ Rules:
 Common causes:
 - A health-plan or vendor file didn't arrive (FileNotFoundError, zero raw files for the date) or arrived
   twice or late; compare with the previous days' files and loads.
-- Many rejects: a partner changed its file layout or formats (check the reject reasons).
+- Many rejects (load_reject_rate_pct fails): a partner changed its file layout or formats. Compare the
+  reject reasons, the plans/files, and the source's previous loads to find which file changed and how.
 - Rows in much lower than usual: an API pull stopped early (paging, expired token, rate limit 429, 5xx).
 - COPY / merge errors: the Parquet schema no longer matches the staging table (a column added or renamed).
 - Redshift: usage limit reached, serializable isolation conflict (error 1023, concurrent writers),

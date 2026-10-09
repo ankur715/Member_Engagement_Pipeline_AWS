@@ -368,3 +368,18 @@ def test_mark_task_failed_adds_a_row_when_nothing_was_loaded(monkeypatch):
     sql, params = conn.log[-1]
     assert sql.startswith("INSERT INTO ops.load_audit") and "'failed'" in sql
     assert params[0] == load_id and params[1] == "data_quality" and conn.committed
+
+
+def test_load_audit_keeps_the_latest_row_per_load_and_drops_other_loads_details(monkeypatch):
+    rows = [dict(FakeSession.data["batch_loads"][0]),
+            {"load_id": "claims-x-2026-10-02", "entity": "claims_x", "status": "failed", "rows_in": 9,
+             "rows_staged": 0, "rows_rejected": 0, "started_at": "t1", "finished_at": "t1", "details": "old error"},
+            {"load_id": "claims-x-2026-10-02", "entity": "claims_x", "status": "succeeded", "rows_in": 954,
+             "rows_staged": 330, "rows_rejected": 610, "started_at": "t2", "finished_at": "t2", "details": None}]
+    monkeypatch.setitem(FakeSession.data, "batch_loads", rows)
+    out = json.loads(tools.Toolbox(tools.TriageTarget(LOAD_ID, "load_member_files", BATCH), FakeSession())
+                     .run("get_load_audit", {})[0])
+    assert out["failed_load"]["details"]                                   # the failed load keeps its error
+    assert out["batch_loads"] == [{"load_id": "claims-x-2026-10-02", "entity": "claims_x", "status": "succeeded",
+                                   "rows_in": 954, "rows_staged": 330, "rows_rejected": 610, "started_at": "t2",
+                                   "attempts": 2}]
