@@ -1,8 +1,8 @@
 """Read-only Redshift access for the triage agent.
 
   - Connects as TRIAGE_REDSHIFT_USER (triage_reader), which only has the
-    triage_reader_ro role from V017: SELECT on the three ops objects in TABLES
-    and nothing else -- no staging, core or care table, so no member PHI.
+    triage_reader_ro role from V017-V019: SELECT on the four ops objects in
+    TABLES and nothing else -- no staging, core or care table, so no member PHI.
   - No free-form SQL: callers pass the NAME of one of the fixed queries in
     QUERIES plus parameters; there is no way to hand this module a SQL string.
   - One connection per triage run, opened on first use, so a paused
@@ -15,8 +15,8 @@ from decimal import Decimal
 from pipeline import config
 from pipeline.redshift import get_connection
 
-# Everything the triage user can read (V017 grants exactly these).
-TABLES = ("ops.load_audit", "ops.dq_results", "ops.v_triage_staging_counts")
+# Everything the triage user can read (V017 and V019 grant exactly these).
+TABLES = ("ops.load_audit", "ops.dq_results", "ops.v_triage_staging_counts", "ops.watermarks")
 
 QUERIES = {
     # get_load_audit: the failed load plus every other load of the same batch date
@@ -48,6 +48,11 @@ QUERIES = {
         WHERE POSITION(%(batch_date)s IN load_id) > 0
         ORDER BY staging_table, load_id
         LIMIT 200;""",
+    # get_watermarks: the incremental-pull high-water marks (one row per API source).
+    "watermarks": """
+        SELECT source, watermark_ts, updated_at
+        FROM ops.watermarks
+        ORDER BY source;""",
     # get_file_history: recent loads of the same source, newest first.
     "entity_history": """
         SELECT load_id, entity, status, rows_in, rows_staged, rows_rejected, started_at

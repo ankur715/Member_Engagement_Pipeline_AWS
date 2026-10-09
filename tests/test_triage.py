@@ -383,3 +383,31 @@ def test_load_audit_keeps_the_latest_row_per_load_and_drops_other_loads_details(
     assert out["batch_loads"] == [{"load_id": "claims-x-2026-10-02", "entity": "claims_x", "status": "succeeded",
                                    "rows_in": 954, "rows_staged": 330, "rows_rejected": 610, "started_at": "t2",
                                    "attempts": 2}]
+
+
+def test_watermarks_flag_a_stuck_incremental_pull(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    monkeypatch.setitem(FakeSession.data, "watermarks", [
+        {"source": "events_api", "watermark_ts": "2026-10-01T10:00:00", "updated_at": (now - timedelta(hours=2)).isoformat()},
+        {"source": "salesforce_activities", "watermark_ts": "2026-09-25T11:41:00",
+         "updated_at": (now - timedelta(days=7)).isoformat()},
+    ])
+    out = json.loads(tools.Toolbox(tools.TriageTarget("ingest_salesforce_activities-2026-10-02",
+                                                      "ingest_salesforce_activities", BATCH), FakeSession())
+                     .run("get_watermarks", {})[0])
+    assert len(out["findings"]) == 1 and out["findings"][0].startswith("salesforce_activities: last advanced 168")
+    assert "7 day(s) before the batch date" in out["findings"][0] and out["meaning"]
+    by_source = {w["source"]: w for w in out["watermarks"]}
+    assert by_source["salesforce_activities"]["task"] == "ingest_salesforce_activities"
+    assert by_source["events_api"]["hours_since_advanced"] == 2.0 and by_source["events_api"]["days_behind_batch_date"] == 1
+
+
+def test_watermarks_all_fresh(monkeypatch):
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+    monkeypatch.setitem(FakeSession.data, "watermarks",
+                        [{"source": "events_api", "watermark_ts": "2026-10-02T09:00:00", "updated_at": now}])
+    out = json.loads(tools.Toolbox(tools.TriageTarget(LOAD_ID, "ingest_events", BATCH), FakeSession())
+                     .run("get_watermarks", {})[0])
+    assert out["findings"] == ["every watermark advanced within the last 26 h"] and out["meaning"] == ""
